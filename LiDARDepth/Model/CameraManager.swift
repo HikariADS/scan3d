@@ -26,14 +26,19 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
     
     let controller: CameraController
     var cancellables = Set<AnyCancellable>()
-    var session: AVCaptureSession { controller.captureSession }
-    
+    var session: AVCaptureSession? { controller.captureSession }
+
+    /// False on Simulator or hardware without LiDAR depth camera.
+    var isDepthCameraAvailable: Bool { controller.isConfigured }
+
     init() {
         // Create an object to store the captured data for the views to present.
         capturedData = CameraCapturedData()
         controller = CameraController()
         controller.isFilteringEnabled = true
-        controller.startStream()
+        if controller.isConfigured {
+            controller.startStream()
+        }
         isFilteringDepth = controller.isFilteringEnabled
         
         NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification).sink { _ in
@@ -43,14 +48,28 @@ class CameraManager: ObservableObject, CaptureDataReceiver {
     }
     
     func startPhotoCapture() {
+        guard controller.isConfigured else { return }
         controller.capturePhoto()
         waitingForCapture = true
     }
-    
+
     func resumeStream() {
+        guard controller.isConfigured else { return }
         controller.startStream()
         processingCapturedResult = false
         waitingForCapture = false
+    }
+
+    /// Stops AV capture so ARKit can use the camera (only one session should own the device).
+    func pauseForARSession() {
+        guard controller.isConfigured else { return }
+        controller.stopStream()
+    }
+
+    /// Resumes depth streaming after leaving the AR tab.
+    func resumeAfterARSession() {
+        guard controller.isConfigured else { return }
+        controller.startStream()
     }
     
     func onNewPhotoData(capturedData: CameraCapturedData) {

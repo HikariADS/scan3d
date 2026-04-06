@@ -10,8 +10,8 @@ import MetalKit
 import Metal
 
 struct ContentView: View {
-    
-    @StateObject private var manager = CameraManager()
+
+    @ObservedObject var manager: CameraManager
     
     @State private var maxDepth = Float(5.0)
     @State private var minDepth = Float(0.0)
@@ -22,6 +22,13 @@ struct ContentView: View {
     
     var body: some View {
         VStack {
+            if !manager.isDepthCameraAvailable {
+                Text("Camera LiDAR depth không khả dụng (Simulator hoặc máy không có LiDAR). Dùng tab Quét 3D trên iPhone Pro có LiDAR.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            }
             HStack {
                 Button {
                     manager.processingCapturedResult ? manager.resumeStream() : manager.startPhotoCapture()
@@ -29,6 +36,7 @@ struct ContentView: View {
                     Image(systemName: manager.processingCapturedResult ? "play.circle" : "camera.circle")
                         .font(.largeTitle)
                 }
+                .disabled(!manager.isDepthCameraAvailable)
                 
                 Text("Depth Filtering")
                 Toggle("Depth Filtering", isOn: $manager.isFilteringDepth).labelsHidden()
@@ -107,7 +115,7 @@ struct SliderDepthBoundaryView: View {
 
 struct ContentView_Previews: PreviewProvider {
     static var previews: some View {
-        ContentView()
+        ContentView(manager: CameraManager())
             .previewDevice("iPhone 12 Pro Max")
     }
 }

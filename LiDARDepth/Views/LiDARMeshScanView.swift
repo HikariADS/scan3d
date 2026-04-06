@@ -15,45 +15,77 @@ struct LiDARMeshScanView: UIViewRepresentable {
     @Binding var isMeshSupported: Bool
     @Binding var arViewRef: ARView?
 
+    /// Release AVFoundation capture so ARSession can open the camera (must run before `session.run`).
+    var prepareForAR: () -> Void
+    /// When false, AR session is paused so the Depth tab can use the camera again.
+    var isTabActive: Bool
+
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
     }
 
     func makeUIView(context: Context) -> ARView {
+        prepareForAR()
+
         let arView = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
         arView.session.delegate = context.coordinator
         context.coordinator.arView = arView
-        DispatchQueue.main.async {
-            arViewRef = arView
-        }
 
         let config = ARWorldTrackingConfiguration()
         let supportsMesh = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         isMeshSupported = supportsMesh
 
+        // Dùng `.mesh` thuần — không dùng `meshWithClassification` làm mặc định vì debug ARKit
+        // sẽ tô màu theo loại bề mặt (xanh/lá/vàng) trông rất khác ảnh thật / Polycam.
         if supportsMesh {
-            if ARWorldTrackingConfiguration.supportsSceneReconstruction(.meshWithClassification) {
-                config.sceneReconstruction = .meshWithClassification
-            } else {
-                config.sceneReconstruction = .mesh
-            }
+            config.sceneReconstruction = .mesh
         }
+        context.coordinator.trackingConfiguration = config
+
         arView.environment.lighting.intensityExponent = 1
         if supportsMesh {
             arView.debugOptions.insert(.showSceneUnderstanding)
         }
-        arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+
+        DispatchQueue.main.async {
+            arViewRef = arView
+        }
+
+        if isTabActive {
+            arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+            context.coordinator.didRunInitialSession = true
+        }
 
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.parent = self
+
+        guard let config = context.coordinator.trackingConfiguration else { return }
+
+        if isTabActive {
+            if context.coordinator.pausedForTabSwitch {
+                uiView.session.run(config, options: [])
+                context.coordinator.pausedForTabSwitch = false
+            } else if !context.coordinator.didRunInitialSession {
+                uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+                context.coordinator.didRunInitialSession = true
+            }
+        } else {
+            if context.coordinator.didRunInitialSession, !context.coordinator.pausedForTabSwitch {
+                uiView.session.pause()
+                context.coordinator.pausedForTabSwitch = true
+            }
+        }
     }
 
     final class Coordinator: NSObject, ARSessionDelegate {
         var parent: LiDARMeshScanView
         weak var arView: ARView?
+        var trackingConfiguration: ARWorldTrackingConfiguration?
+        var didRunInitialSession = false
+        var pausedForTabSwitch = false
 
         init(parent: LiDARMeshScanView) {
             self.parent = parent
@@ -71,6 +103,9 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
 struct LiDARMeshScanContainer: View {
 
+    var isTabActive: Bool
+    var prepareForAR: () -> Void
+
     @State private var meshAnchorCount = 0
     @State private var triangleCount = 0
     @State private var isMeshSupported = true
@@ -86,7 +121,9 @@ struct LiDARMeshScanContainer: View {
                 meshAnchorCount: $meshAnchorCount,
                 triangleCount: $triangleCount,
                 isMeshSupported: $isMeshSupported,
-                arViewRef: $arViewRef
+                arViewRef: $arViewRef,
+                prepareForAR: prepareForAR,
+                isTabActive: isTabActive
             )
             .ignoresSafeArea()
             .onDisappear {
@@ -117,7 +154,7 @@ struct LiDARMeshScanContainer: View {
                 .background(.ultraThinMaterial)
                 .cornerRadius(12)
 
-                Text("Quét chậm, đứng cách tường ~1–2 m để mesh dày hơn. Màu lấy từ khung camera tại thời điểm xuất; mở file .ply nếu app xem OBJ không hiện màu.")
+                Text("Ưu tiên mở file .glb trong Xcode hoặc Blender — có màu đỉnh (COLOR_0) và mặt tam giác tách (nhìn rõ vật hơn). .obj trong Xcode thường chỉ xám.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -129,7 +166,7 @@ struct LiDARMeshScanContainer: View {
                         ProgressView()
                             .frame(maxWidth: .infinity)
                     } else {
-                        Label("Xuất mesh có màu (.obj + .ply)", systemImage: "square.and.arrow.up")
+                        Label("Xuất .glb + .obj + .ply", systemImage: "square.and.arrow.up")
                             .frame(maxWidth: .infinity)
                     }
                 }
@@ -163,9 +200,15 @@ struct LiDARMeshScanContainer: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let objText = ARMeshExporter.buildColoredOBJString(from: session)
             let plyText = ARMeshExporter.buildColoredPLYString(from: session)
+            let glbData = ARMeshExporter.buildFacetedGLB(from: session)
             let dir = FileManager.default.temporaryDirectory
             var urls: [URL] = []
             do {
+                if let glbData {
+                    let u = dir.appendingPathComponent("LiDARDepth-scan-\(stamp).glb")
+                    try glbData.write(to: u, options: .atomic)
+                    urls.append(u)
+                }
                 if let objText {
                     let u = dir.appendingPathComponent("LiDARDepth-scan-\(stamp).obj")
                     try objText.write(to: u, atomically: true, encoding: .utf8)

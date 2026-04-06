@@ -34,6 +34,14 @@ enum ARMeshExporter {
         return buildColoredPLYString(meshAnchors: meshAnchors, frame: frame)
     }
 
+    /// Binary glTF 2.0: per-face color + flat normals — **Xcode Scene Editor shows COLOR_0**; good for “rõ vật thể”.
+    static func buildFacetedGLB(from session: ARSession) -> Data? {
+        guard let frame = session.currentFrame else { return nil }
+        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshAnchors.isEmpty else { return nil }
+        return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame)
+    }
+
     static func meshStatistics(from session: ARSession) -> (anchors: Int, triangles: Int) {
         guard let frame = session.currentFrame else { return (0, 0) }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
@@ -72,7 +80,7 @@ enum ARMeshExporter {
 
     private static func buildColoredOBJString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
         let orientation = activeInterfaceOrientation()
-        var obj = "# LiDARDepth — vertex RGB từ camera (0–1), vn từ ARKit\n"
+        var obj = "# LiDARDepth — vertex RGB (0–1). Xcode Scene Editor thường KHÔNG hiển thị màu đỉnh OBJ — mở file .glb hoặc .ply.\n"
         var vertexBase = 1
         var normalBase = 1
 
@@ -81,8 +89,10 @@ enum ARMeshExporter {
             let verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
             let normalsOpt = worldNormalsIfAvailable(geometry: geometry, transform: anchor.transform)
 
-            for v in verts {
-                let c = sampleCameraColor(worldPosition: v, frame: frame, orientation: orientation)
+            for i in 0..<verts.count {
+                let v = verts[i]
+                let n = normalsOpt?[i]
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, orientation: orientation)
                 obj += String(format: "v %.6f %.6f %.6f %.6f %.6f %.6f\n", v.x, v.y, v.z, c.x, c.y, c.z)
             }
 
@@ -126,8 +136,11 @@ enum ARMeshExporter {
         for anchor in meshAnchors {
             let geometry = anchor.geometry
             let verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
-            for v in verts {
-                let c = sampleCameraColor(worldPosition: v, frame: frame, orientation: orientation)
+            let normalsOpt = worldNormalsIfAvailable(geometry: geometry, transform: anchor.transform)
+            for i in 0..<verts.count {
+                let v = verts[i]
+                let n = normalsOpt?[i]
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, orientation: orientation)
                 positions.append(v)
                 colors.append(c)
             }
@@ -162,6 +175,104 @@ enum ARMeshExporter {
             ply += "3 \(f.0) \(f.1) \(f.2)\n"
         }
         return ply
+    }
+
+    // MARK: - glTF 2.0 GLB (faceted, per-triangle color)
+
+    private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> Data? {
+        let orientation = activeInterfaceOrientation()
+        var positions: [Float] = []
+        var normals: [Float] = []
+        var colors: [Float] = []
+
+        for anchor in meshAnchors {
+            let geometry = anchor.geometry
+            let verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
+            let indices = triangleIndices(geometry: geometry)
+            for t in stride(from: 0, to: indices.count, by: 3) {
+                let i0 = Int(indices[t])
+                let i1 = Int(indices[t + 1])
+                let i2 = Int(indices[t + 2])
+                let p0 = verts[i0]
+                let p1 = verts[i1]
+                let p2 = verts[i2]
+                let e1 = p1 - p0
+                let e2 = p2 - p0
+                var fn = simd_cross(e1, e2)
+                let ln = simd_length(fn)
+                guard ln >= 1e-8 else { continue }
+                fn = fn / ln
+                let center = (p0 + p1 + p2) * (1.0 / 3.0)
+                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame, orientation: orientation)
+                for p in [p0, p1, p2] {
+                    positions.append(contentsOf: [p.x, p.y, p.z])
+                    normals.append(contentsOf: [fn.x, fn.y, fn.z])
+                    colors.append(contentsOf: [c.x, c.y, c.z])
+                }
+            }
+        }
+        let vertexCount = positions.count / 3
+        guard vertexCount > 0 else { return nil }
+        return encodeGLB(positions: positions, normals: normals, colors: colors, vertexCount: vertexCount)
+    }
+
+    private static func encodeGLB(positions: [Float], normals: [Float], colors: [Float], vertexCount: Int) -> Data {
+        let posData = positions.withUnsafeBufferPointer { Data(buffer: $0) }
+        let normData = normals.withUnsafeBufferPointer { Data(buffer: $0) }
+        let colorData = colors.withUnsafeBufferPointer { Data(buffer: $0) }
+        let bufferByteLength = posData.count + normData.count + colorData.count
+
+        var binChunk = Data()
+        binChunk.append(posData)
+        binChunk.append(normData)
+        binChunk.append(colorData)
+        while binChunk.count % 4 != 0 {
+            binChunk.append(0)
+        }
+
+        var minP = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxP = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for i in 0..<vertexCount {
+            let x = positions[i * 3 + 0]
+            let y = positions[i * 3 + 1]
+            let z = positions[i * 3 + 2]
+            minP = SIMD3<Float>(min(minP.x, x), min(minP.y, y), min(minP.z, z))
+            maxP = SIMD3<Float>(max(maxP.x, x), max(maxP.y, y), max(maxP.z, z))
+        }
+
+        let p0 = posData.count
+        let p1 = p0 + normData.count
+
+        let json: String = """
+        {"asset":{"version":"2.0","generator":"LiDARDepth"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"material":0}]}],"materials":[{"doubleSided":true,"pbrMetallicRoughness":{"metallicFactor":0,"roughnessFactor":0.85}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5126,"count":\(vertexCount),"type":"VEC3"}]}
+        """
+
+        var jsonData = Data(json.utf8)
+        while jsonData.count % 4 != 0 {
+            jsonData.append(0x20)
+        }
+
+        let jsonChunkLength = jsonData.count
+        let binChunkLength = binChunk.count
+        let totalLength = 12 + 8 + jsonChunkLength + 8 + binChunkLength
+
+        var out = Data()
+        out.append(contentsOf: [0x67, 0x6C, 0x54, 0x46])
+        out.append(contentsOf: [2, 0, 0, 0])
+        var totalLE = UInt32(totalLength).littleEndian
+        out.append(Data(bytes: &totalLE, count: 4))
+
+        var jsonLenLE = UInt32(jsonChunkLength).littleEndian
+        out.append(Data(bytes: &jsonLenLE, count: 4))
+        out.append(contentsOf: [0x4A, 0x53, 0x4F, 0x4E])
+        out.append(jsonData)
+
+        var binLenLE = UInt32(binChunkLength).littleEndian
+        out.append(Data(bytes: &binLenLE, count: 4))
+        out.append(contentsOf: [0x42, 0x49, 0x4E, 0x00])
+        out.append(binChunk)
+
+        return out
     }
 
     // MARK: - Geometry
@@ -243,34 +354,51 @@ enum ARMeshExporter {
         return scene.interfaceOrientation
     }
 
-    /// Projects world point into the current camera image and samples RGB (bilinear).
-    private static func sampleCameraColor(worldPosition: SIMD3<Float>, frame: ARFrame, orientation: UIInterfaceOrientation) -> SIMD3<Float> {
+    /// Samples vertex color: facing check + 5-tap cross filter (reduces speckle). True texture needs UV / multi-view fusion.
+    private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, orientation: UIInterfaceOrientation) -> SIMD3<Float> {
         let cam = frame.camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
-        // Camera looks along -Z; surfaces in front have negative z.
         if cam.z > -0.02 {
+            return SIMD3<Float>(repeating: 0.55)
+        }
+
+        // Chỉ bỏ mặt sau thật (normal ngược hướng camera). Ngưỡng 0.06 trước đây khiến gần hết đỉnh thành xám.
+        if let n = worldNormal {
+            let camT = frame.camera.transform
+            let camPos = SIMD3<Float>(camT.columns.3.x, camT.columns.3.y, camT.columns.3.z)
+            let toCamera = simd_normalize(camPos - worldPosition)
+            let ndotl = simd_dot(simd_normalize(n), toCamera)
+            if ndotl < 0 {
+                return SIMD3<Float>(repeating: 0.5)
+            }
+        }
+
+        guard let projected = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame, orientation: orientation) else {
             return SIMD3<Float>(repeating: 0.55)
         }
 
         let pb = frame.capturedImage
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
-        let format = CVPixelBufferGetPixelFormatType(pb)
 
-        guard let projected = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame, orientation: orientation) else {
-            return SIMD3<Float>(repeating: 0.55)
+        let offsets: [(CGFloat, CGFloat)] = [(0, 0), (-1.5, 0), (1.5, 0), (0, -1.5), (0, 1.5)]
+        var acc = SIMD3<Float>(0, 0, 0)
+        for (dx, dy) in offsets {
+            acc += sampleRGBAtImage(pixelBuffer: pb, x: projected.x + dx, y: projected.y + dy, width: w, height: h)
         }
-        let x = projected.x
-        let yTopLeft = projected.y
+        return simd_clamp(acc / 5, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+    }
 
+    private static func sampleRGBAtImage(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> SIMD3<Float> {
+        let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
         if format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
             || format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
             let full = format == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            return sampleYUVBilinear(pixelBuffer: pb, x: x, y: yTopLeft, width: w, height: h, fullRange: full)
+            return sampleYUVBilinear(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height, fullRange: full)
         }
         if format == kCVPixelFormatType_32BGRA {
-            return sampleBGRABilinear(pixelBuffer: pb, x: x, y: yTopLeft, width: w, height: h)
+            return sampleBGRABilinear(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
         }
-        return sampleRGBCoreImage(pixelBuffer: pb, x: x, y: yTopLeft, width: w, height: h)
+        return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
     }
 
     /// Pinhole projection with intrinsics, then map to pixel-buffer space using `displayTransform` inverse.
