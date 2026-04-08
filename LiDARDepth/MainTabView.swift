@@ -1,4 +1,4 @@
-/*
+                                                                               /*
  Abstract:
  Root tabs: original depth sample + LiDAR mesh scan demo.
  AVFoundation and ARKit cannot use the LiDAR camera at the same time — we pause one when switching tabs.
