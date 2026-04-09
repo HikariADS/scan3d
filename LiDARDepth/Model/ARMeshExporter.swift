@@ -162,11 +162,21 @@ enum ARMeshExporter {
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
     private static var frameHistory: [ARFrame] = []
+    private static var patchFrameHistory: [UUID: [ARFrame]] = [:]
     // Giữ nhiều frame hơn để tăng độ phủ màu và texture khi export vật gần.
     private static let maxHistoryFrames = 64
     private static let maxFusionFrames = 32
 
     static func recordFrameForColorFusion(_ frame: ARFrame) {
+        recordFrameForColorFusion(frame, cameraPosition: nil, detailPatches: [], preferPatchHistory: false)
+    }
+
+    static func recordFrameForColorFusion(
+        _ frame: ARFrame,
+        cameraPosition: SIMD3<Float>?,
+        detailPatches: [DetailPatch],
+        preferPatchHistory: Bool
+    ) {
         historyQueue.sync {
             if let last = frameHistory.last, abs(last.timestamp - frame.timestamp) < 1e-4 {
                 return
@@ -175,22 +185,57 @@ enum ARMeshExporter {
             if frameHistory.count > maxHistoryFrames {
                 frameHistory.removeFirst(frameHistory.count - maxHistoryFrames)
             }
+
+            guard preferPatchHistory,
+                  let camPos = cameraPosition,
+                  let patch = nearestPatch(to: camPos, detailPatches: detailPatches, expandFactor: 2.2)
+            else { return }
+
+            var frames = patchFrameHistory[patch.id] ?? []
+            if let last = frames.last, abs(last.timestamp - frame.timestamp) < 1e-4 {
+                patchFrameHistory[patch.id] = frames
+                return
+            }
+            frames.append(frame)
+            if frames.count > maxHistoryFrames {
+                frames.removeFirst(frames.count - maxHistoryFrames)
+            }
+            patchFrameHistory[patch.id] = frames
         }
     }
 
     static func resetFrameHistory() {
         historyQueue.sync {
             frameHistory.removeAll(keepingCapacity: true)
+            patchFrameHistory.removeAll(keepingCapacity: true)
         }
     }
 
     private static func fusionFrames(including current: ARFrame) -> [ARFrame] {
+        fusionFrames(including: current, preferredPatchID: nil)
+    }
+
+    private static func fusionFrames(including current: ARFrame, preferredPatchID: UUID?) -> [ARFrame] {
         historyQueue.sync {
-            let recent = Array(frameHistory.suffix(maxFusionFrames))
-            if recent.contains(where: { abs($0.timestamp - current.timestamp) < 1e-4 }) {
-                return recent
+            var candidates = Array(frameHistory.suffix(maxFusionFrames))
+            if let preferredPatchID, let patchFrames = patchFrameHistory[preferredPatchID] {
+                candidates.append(contentsOf: patchFrames.suffix(maxFusionFrames))
             }
-            return Array((recent + [current]).suffix(maxFusionFrames))
+
+            var unique: [ARFrame] = []
+            var seen: [TimeInterval] = []
+            for frame in candidates.reversed() {
+                if seen.contains(where: { abs($0 - frame.timestamp) < 1e-4 }) { continue }
+                seen.append(frame.timestamp)
+                unique.append(frame)
+                if unique.count >= maxFusionFrames { break }
+            }
+            unique.reverse()
+
+            if unique.contains(where: { abs($0.timestamp - current.timestamp) < 1e-4 }) {
+                return unique
+            }
+            return Array((unique + [current]).suffix(maxFusionFrames))
         }
     }
 
@@ -376,7 +421,7 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag, profile: ExportProfile(subject: .room), preferredPatchID: nil)
                 diag.countVertex()
                 obj += String(format: "v %.6f %.6f %.6f %.6f %.6f %.6f\n", v.x, v.y, v.z, c.x, c.y, c.z)
             }
@@ -420,7 +465,7 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag, profile: ExportProfile(subject: .room), preferredPatchID: nil)
                 diag.countVertex()
                 positions.append(v)
                 colors.append(c)
@@ -479,7 +524,15 @@ enum ARMeshExporter {
                 let p = mesh.positions[i]
                 let n = mesh.normals[i]
                 let localProfile = profileForPosition(p, baseProfile: profile, detailPatches: detailPatches)
-                let c = sampleCameraColor(worldPosition: p, worldNormal: n, frame: frame, diag: diag, profile: localProfile)
+                let preferredPatchID = nearestPatchID(for: p, detailPatches: detailPatches)
+                let c = sampleCameraColor(
+                    worldPosition: p,
+                    worldNormal: n,
+                    frame: frame,
+                    diag: diag,
+                    profile: localProfile,
+                    preferredPatchID: preferredPatchID
+                )
                 diag.countVertex()
                 positions.append(contentsOf: [p.x, p.y, p.z])
                 normals.append(contentsOf: [n.x, n.y, n.z])
@@ -751,24 +804,50 @@ enum ARMeshExporter {
         return baseProfile
     }
 
+    private static func nearestPatchID(
+        for position: SIMD3<Float>,
+        detailPatches: [DetailPatch],
+        expandFactor: Float = 1.35
+    ) -> UUID? {
+        nearestPatch(to: position, detailPatches: detailPatches, expandFactor: expandFactor)?.id
+    }
+
+    private static func nearestPatch(
+        to position: SIMD3<Float>,
+        detailPatches: [DetailPatch],
+        expandFactor: Float
+    ) -> DetailPatch? {
+        var best: DetailPatch?
+        var bestDist = Float.greatestFiniteMagnitude
+        for patch in detailPatches {
+            let d = simd_distance(position, patch.center)
+            if d <= patch.radius * expandFactor, d < bestDist {
+                best = patch
+                bestDist = d
+            }
+        }
+        return best
+    }
+
     private static func bestTextureFrames(
         from frames: [ARFrame],
         preparedMeshes: [PreparedMesh],
         profile: ExportProfile,
         detailPatches: [DetailPatch]
     ) -> [ARFrame] {
-        guard !frames.isEmpty else { return [] }
+        let candidateFrames = mergedCandidateFrames(baseFrames: frames, detailPatches: detailPatches)
+        guard !candidateFrames.isEmpty else { return [] }
         let allPoints = preparedMeshes.flatMap { $0.positions }
         let samplePoints = allPoints.enumerated().compactMap { idx, p in
             idx % 18 == 0 ? p : nil
         }
-        guard !samplePoints.isEmpty else { return [frames.last!]} // safe: frames not empty
+        guard !samplePoints.isEmpty else { return [candidateFrames.last!]} // safe: not empty
 
         let effectiveAtlasCount = max(profile.atlasFrameCount, detailPatches.isEmpty ? 0 : ExportProfile(subject: .ultraDetailObject).atlasFrameCount)
         let patchCenters = detailPatches.map(\.center)
         let patchRadii = detailPatches.map(\.radius)
 
-        let scored = frames.enumerated().map { frameOrder, frame -> (ARFrame, Float) in
+        let scored = candidateFrames.enumerated().map { frameOrder, frame -> (ARFrame, Float) in
             let camPos = cameraPosition(frame: frame)
             let img = frame.capturedImage
             let w = CVPixelBufferGetWidth(img)
@@ -804,6 +883,26 @@ enum ARMeshExporter {
         let sorted = scored.sorted { $0.1 > $1.1 }
         let unique = sorted.prefix(max(1, effectiveAtlasCount)).map { $0.0 }
         return Array(unique)
+    }
+
+    private static func mergedCandidateFrames(baseFrames: [ARFrame], detailPatches: [DetailPatch]) -> [ARFrame] {
+        historyQueue.sync {
+            var combined = baseFrames
+            for patch in detailPatches {
+                if let frames = patchFrameHistory[patch.id] {
+                    combined.append(contentsOf: frames.suffix(maxFusionFrames))
+                }
+            }
+
+            var unique: [ARFrame] = []
+            var seen: [TimeInterval] = []
+            for frame in combined {
+                if seen.contains(where: { abs($0 - frame.timestamp) < 1e-4 }) { continue }
+                seen.append(frame.timestamp)
+                unique.append(frame)
+            }
+            return unique
+        }
     }
 
     private static func buildTextureAtlas(from frames: [ARFrame], quality: CGFloat) -> TextureAtlas? {
@@ -884,7 +983,14 @@ enum ARMeshExporter {
     /// - Border confidence
     /// - 5-tap pixel sampling to reduce sensor noise
     private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, diag: ColorDiag? = nil) -> SIMD3<Float> {
-        sampleCameraColor(worldPosition: worldPosition, worldNormal: worldNormal, frame: frame, diag: diag, profile: ExportProfile(subject: .room))
+        sampleCameraColor(
+            worldPosition: worldPosition,
+            worldNormal: worldNormal,
+            frame: frame,
+            diag: diag,
+            profile: ExportProfile(subject: .room),
+            preferredPatchID: nil
+        )
     }
 
     private static func sampleCameraColor(
@@ -892,9 +998,10 @@ enum ARMeshExporter {
         worldNormal: SIMD3<Float>?,
         frame: ARFrame,
         diag: ColorDiag? = nil,
-        profile: ExportProfile
+        profile: ExportProfile,
+        preferredPatchID: UUID?
     ) -> SIMD3<Float> {
-        let frames = fusionFrames(including: frame)
+        let frames = fusionFrames(including: frame, preferredPatchID: preferredPatchID)
         if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.55) }
         var colorAccum = SIMD3<Float>(0, 0, 0)
         var weightAccum: Float = 0

@@ -21,6 +21,8 @@ struct LiDARMeshScanView: UIViewRepresentable {
     @Binding var scanStageText: String
     @Binding var isMovingTooFast: Bool
     @Binding var exportSubject: ARMeshExporter.ExportSubject
+    @Binding var detailPatches: [ARMeshExporter.DetailPatch]
+    @Binding var prefersPatchCapture: Bool
 
     var prepareForAR: () -> Void
     var isTabActive: Bool
@@ -139,11 +141,21 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
             if let last = lastRecordedCamPos {
                 if simd_length(camPos - last) >= recordDistanceThreshold {
-                    ARMeshExporter.recordFrameForColorFusion(frame)
+                    ARMeshExporter.recordFrameForColorFusion(
+                        frame,
+                        cameraPosition: camPos,
+                        detailPatches: parent.detailPatches,
+                        preferPatchHistory: parent.prefersPatchCapture
+                    )
                     lastRecordedCamPos = camPos
                 }
             } else {
-                ARMeshExporter.recordFrameForColorFusion(frame)
+                ARMeshExporter.recordFrameForColorFusion(
+                    frame,
+                    cameraPosition: camPos,
+                    detailPatches: parent.detailPatches,
+                    preferPatchHistory: parent.prefersPatchCapture
+                )
                 lastRecordedCamPos = camPos
             }
 
@@ -305,6 +317,8 @@ struct LiDARMeshScanContainer: View {
                 scanStageText: $scanStageText,
                 isMovingTooFast: $isMovingTooFast,
                 exportSubject: $exportSubject,
+                detailPatches: $detailPatches,
+                prefersPatchCapture: .constant(workflowMode == .detailPatch),
                 prepareForAR: prepareForAR,
                 isTabActive: isTabActive
             )
