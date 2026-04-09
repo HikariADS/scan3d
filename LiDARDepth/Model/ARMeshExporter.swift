@@ -59,6 +59,7 @@ enum ARMeshExporter {
     enum ExportSubject: String, CaseIterable, Identifiable {
         case room
         case nearbyObject
+        case ultraDetailObject
 
         var id: String { rawValue }
 
@@ -66,6 +67,7 @@ enum ARMeshExporter {
             switch self {
             case .room: return "Không gian"
             case .nearbyObject: return "Vật gần"
+            case .ultraDetailObject: return "Siêu chi tiết"
             }
         }
     }
@@ -78,34 +80,67 @@ enum ARMeshExporter {
             switch subject {
             case .room: return 6.0
             case .nearbyObject: return 2.2
+            case .ultraDetailObject: return 1.1
             }
         }
         var depthToleranceBase: Float {
             switch subject {
             case .room: return 0.06
             case .nearbyObject: return 0.05
+            case .ultraDetailObject: return 0.06
             }
         }
         var depthToleranceScale: Float {
             switch subject {
             case .room: return 0.08
             case .nearbyObject: return 0.08
+            case .ultraDetailObject: return 0.10
             }
         }
         var textureJPEGQuality: CGFloat {
             switch subject {
             case .room: return 0.92
             case .nearbyObject: return 0.98
+            case .ultraDetailObject: return 1.0
             }
         }
         var atlasFrameCount: Int {
             switch subject {
             case .room: return 1
             case .nearbyObject: return 4
+            case .ultraDetailObject: return 9
             }
         }
         var prefersAggressiveOcclusion: Bool {
-            subject == .nearbyObject
+            subject != .room
+        }
+        var centerBias: Float {
+            switch subject {
+            case .room: return 0.0
+            case .nearbyObject: return 0.35
+            case .ultraDetailObject: return 0.75
+            }
+        }
+        var bestFrameBlend: Float {
+            switch subject {
+            case .room: return 0.0
+            case .nearbyObject: return 0.68
+            case .ultraDetailObject: return 0.86
+            }
+        }
+        var saturationBoost: Float {
+            switch subject {
+            case .room: return 1.12
+            case .nearbyObject: return 1.38
+            case .ultraDetailObject: return 1.48
+            }
+        }
+        var contrastBoost: Float {
+            switch subject {
+            case .room: return 1.04
+            case .nearbyObject: return 1.10
+            case .ultraDetailObject: return 1.14
+            }
         }
     }
 
@@ -605,6 +640,13 @@ enum ARMeshExporter {
         profile: ExportProfile
     ) -> PreparedMesh {
         guard profile.subject == .nearbyObject else {
+            if profile.subject == .ultraDetailObject {
+                // rơi xuống nhánh lọc mạnh hơn bên dưới
+            } else {
+                return PreparedMesh(positions: positions, normals: normals, indices: indices)
+            }
+        }
+        if profile.subject == .room {
             return PreparedMesh(positions: positions, normals: normals, indices: indices)
         }
 
@@ -620,6 +662,13 @@ enum ARMeshExporter {
             let dist = simd_distance(center, cameraPosition)
             if dist < profile.objectMinDistance || dist > profile.objectMaxDistance {
                 continue
+            }
+
+            if profile.subject == .ultraDetailObject {
+                let area = simd_length(simd_cross(positions[i1] - positions[i0], positions[i2] - positions[i0])) * 0.5
+                if area < 1e-6 {
+                    continue
+                }
             }
 
             keptVertices.insert(i0)
@@ -679,7 +728,9 @@ enum ARMeshExporter {
                 guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: profile) else { continue }
                 let depth = simd_distance(camPos, p)
                 guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else { continue }
-                score += imageBorderWeight(point: pt, width: w, height: h) * (1.0 / (1.0 + 0.35 * depth * depth))
+                let border = imageBorderWeight(point: pt, width: w, height: h)
+                let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
+                score += border * center * (1.0 / (1.0 + 0.35 * depth * depth))
                 hits += 1
             }
 
@@ -812,9 +863,8 @@ enum ARMeshExporter {
             diag?.countColor()
             let fused = simd_clamp(colorAccum / weightAccum, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
             let finalColor: SIMD3<Float>
-            if profile.subject == .nearbyObject, bestWeight > 0 {
-                // Với vật gần, giữ chi tiết màu bằng cách ưu tiên frame tốt nhất hơn là trộn quá mạnh.
-                finalColor = simd_mix(fused, bestColor, SIMD3<Float>(repeating: 0.68))
+            if profile.bestFrameBlend > 0, bestWeight > 0 {
+                finalColor = simd_mix(fused, bestColor, SIMD3<Float>(repeating: profile.bestFrameBlend))
             } else {
                 finalColor = fused
             }
@@ -900,11 +950,21 @@ enum ARMeshExporter {
             diag?.countBackface()
         }
         let angleWeight = max(0.35, min(1.0, 0.35 + 0.65 * facing))
-        let distanceScale: Float = profile.subject == .nearbyObject ? 0.45 : 0.65
+        let distanceScale: Float
+        switch profile.subject {
+        case .room: distanceScale = 0.65
+        case .nearbyObject: distanceScale = 0.45
+        case .ultraDetailObject: distanceScale = 0.28
+        }
         let distanceWeight = 1.0 / (1.0 + distanceScale * dist * dist)
         let borderWeight = imageBorderWeight(point: projected, width: w, height: h)
         let recency = Float(frameOrder + 1) / Float(max(totalFrames, 1))
-        let temporalWeight = profile.subject == .nearbyObject ? (0.75 + 0.25 * recency) : (0.65 + 0.35 * recency)
+        let temporalWeight: Float
+        switch profile.subject {
+        case .room: temporalWeight = 0.65 + 0.35 * recency
+        case .nearbyObject: temporalWeight = 0.75 + 0.25 * recency
+        case .ultraDetailObject: temporalWeight = 0.85 + 0.15 * recency
+        }
         let weight = angleWeight * distanceWeight * borderWeight * temporalWeight
         if weight < 1e-5 {
             diag?.countZeroWeight()
@@ -935,7 +995,12 @@ enum ARMeshExporter {
             return true
         }
 
-        let nearbyBoost: Float = profile.subject == .nearbyObject ? 1.35 : 1.0
+        let nearbyBoost: Float
+        switch profile.subject {
+        case .room: nearbyBoost = 1.0
+        case .nearbyObject: nearbyBoost = 1.35
+        case .ultraDetailObject: nearbyBoost = 1.65
+        }
         let tolerance = max(profile.depthToleranceBase, geometricDepth * profile.depthToleranceScale) * nearbyBoost
         // Chỉ loại khi depth map cho thấy có vật gần hơn rõ rệt đang che điểm mesh này.
         // Đây là check một chiều nên giữ được nhiều màu hơn so với so tuyệt đối.
@@ -990,12 +1055,24 @@ enum ARMeshExporter {
             let w = CVPixelBufferGetWidth(img)
             let h = CVPixelBufferGetHeight(img)
             let border = imageBorderWeight(point: pt, width: w, height: h)
-            let score = border * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.01
+            let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
+            let score = border * center * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.01
             if best == nil || score > best!.score {
                 best = TextureProjection(frameIndex: idx, point: pt, score: score)
             }
         }
         return best
+    }
+
+    private static func centerWeight(point: CGPoint, width: Int, height: Int, bias: Float) -> Float {
+        guard bias > 0 else { return 1 }
+        let cx = CGFloat(width) * 0.5
+        let cy = CGFloat(height) * 0.5
+        let dx = (point.x - cx) / max(CGFloat(width) * 0.5, 1)
+        let dy = (point.y - cy) / max(CGFloat(height) * 0.5, 1)
+        let d = min(1, sqrt(dx * dx + dy * dy))
+        let center = 1 - Float(d)
+        return 1 + center * bias
     }
 
     private static func textureCoordinatePoint(
@@ -1014,17 +1091,21 @@ enum ARMeshExporter {
             return nil
         }
         let ndotl = abs(simd_dot(simd_normalize(normal), simd_normalize(camPos - worldPosition)))
-        guard ndotl >= (profile.prefersAggressiveOcclusion ? 0.02 : 0.01) else { return nil }
+        let minFacing: Float
+        switch profile.subject {
+        case .room: minFacing = 0.01
+        case .nearbyObject: minFacing = 0.02
+        case .ultraDetailObject: minFacing = 0.04
+        }
+        guard ndotl >= minFacing else { return nil }
         return pt
     }
 
     private static func enhanceSampledColor(_ color: SIMD3<Float>, profile: ExportProfile) -> SIMD3<Float> {
         let luminance = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
         let gray = SIMD3<Float>(repeating: luminance)
-        let saturationBoost: Float = profile.subject == .nearbyObject ? 1.38 : 1.12
-        let contrastBoost: Float = profile.subject == .nearbyObject ? 1.10 : 1.04
-        let boostedSat = gray + (color - gray) * saturationBoost
-        let boostedContrast = (boostedSat - SIMD3<Float>(repeating: 0.5)) * contrastBoost + SIMD3<Float>(repeating: 0.5)
+        let boostedSat = gray + (color - gray) * profile.saturationBoost
+        let boostedContrast = (boostedSat - SIMD3<Float>(repeating: 0.5)) * profile.contrastBoost + SIMD3<Float>(repeating: 0.5)
         return simd_clamp(boostedContrast, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
     }
 

@@ -130,7 +130,15 @@ struct LiDARMeshScanView: UIViewRepresentable {
                 frame.camera.transform.columns.3.z
             )
 
-            let recordDistanceThreshold: Float = parent.exportSubject == .nearbyObject ? 0.008 : 0.03
+            let recordDistanceThreshold: Float
+            switch parent.exportSubject {
+            case .room:
+                recordDistanceThreshold = 0.03
+            case .nearbyObject:
+                recordDistanceThreshold = 0.008
+            case .ultraDetailObject:
+                recordDistanceThreshold = 0.004
+            }
             if let last = lastRecordedCamPos {
                 if simd_length(camPos - last) >= recordDistanceThreshold {
                     ARMeshExporter.recordFrameForColorFusion(frame)
@@ -152,9 +160,25 @@ struct LiDARMeshScanView: UIViewRepresentable {
             lastSpeedTimestamp = frame.timestamp
             lastSpeedCamPos = camPos
 
-            let tooFast = speed > (parent.exportSubject == .nearbyObject ? 0.18 : 0.45)
+            let tooFast: Bool
+            switch parent.exportSubject {
+            case .room:
+                tooFast = speed > 0.45
+            case .nearbyObject:
+                tooFast = speed > 0.18
+            case .ultraDetailObject:
+                tooFast = speed > 0.10
+            }
             let triangles = cachedTriangleCount
-            let triangleTarget = parent.exportSubject == .nearbyObject ? 45_000.0 : 80_000.0
+            let triangleTarget: Double
+            switch parent.exportSubject {
+            case .room:
+                triangleTarget = 80_000
+            case .nearbyObject:
+                triangleTarget = 45_000
+            case .ultraDetailObject:
+                triangleTarget = 65_000
+            }
             let densityProgress = min(Double(triangles) / triangleTarget, 1.0)
             let stabilityPenalty: Double = tooFast ? 0.15 : 0
             let finalProgress = max(0, min(1, densityProgress - stabilityPenalty))
@@ -227,7 +251,7 @@ struct LiDARMeshScanContainer: View {
     @State private var isExporting = false
     @State private var arViewRef: ARView?
     @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .precise
-    @State private var exportSubject: ARMeshExporter.ExportSubject = .nearbyObject
+    @State private var exportSubject: ARMeshExporter.ExportSubject = .ultraDetailObject
     @State private var scanProgress: Double = 0
     @State private var scanStageText: String = "Đang khởi động mesh..."
     @State private var isMovingTooFast: Bool = false
@@ -282,9 +306,11 @@ struct LiDARMeshScanContainer: View {
                 .cornerRadius(12)
 
                 if isMovingTooFast {
-                    Text(exportSubject == .nearbyObject
-                         ? "Quét vật gần cần di chuyển rất chậm để giữ đúng mép, chiều sâu và màu."
-                         : "Di chuyển hơi nhanh - quét chậm để giữ màu và hình khối tốt hơn.")
+                    Text(exportSubject == .ultraDetailObject
+                         ? "Siêu chi tiết yêu cầu gần như đứng yên giữa các khung. Hãy quét cực chậm."
+                         : (exportSubject == .nearbyObject
+                            ? "Quét vật gần cần di chuyển rất chậm để giữ đúng mép, chiều sâu và màu."
+                            : "Di chuyển hơi nhanh - quét chậm để giữ màu và hình khối tốt hơn."))
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .padding(6)
@@ -299,19 +325,25 @@ struct LiDARMeshScanContainer: View {
                 }
                 .pickerStyle(.segmented)
 
-                Text(exportSubject == .nearbyObject
-                     ? "Vật gần: lọc nền xa, siết chiều sâu, ưu tiên laptop, màn hình, bàn."
-                     : "Không gian: giữ phạm vi rộng hơn, phù hợp quét phòng và bố cục tổng thể.")
+                Text(exportSubject == .ultraDetailObject
+                     ? "Siêu chi tiết: dồn mạnh vào vật thể trung tâm, nhiều texture hơn, ưu tiên độ sắc nét."
+                     : (exportSubject == .nearbyObject
+                        ? "Vật gần: lọc nền xa, siết chiều sâu, ưu tiên laptop, màn hình, bàn."
+                        : "Không gian: giữ phạm vi rộng hơn, phù hợp quét phòng và bố cục tổng thể."))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
-                if exportSubject == .nearbyObject {
+                if exportSubject != .room {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Hướng dẫn quét vật gần")
+                        Text(exportSubject == .ultraDetailObject ? "Hướng dẫn siêu chi tiết" : "Hướng dẫn quét vật gần")
                             .font(.caption.bold())
-                        Text("1. Giữ vật ở giữa khung hình, cách khoảng 25-70cm.")
+                        Text(exportSubject == .ultraDetailObject
+                             ? "1. Giữ vật ở giữa khung hình, cách khoảng 20-45cm."
+                             : "1. Giữ vật ở giữa khung hình, cách khoảng 25-70cm.")
                             .font(.caption2)
-                        Text("2. Lia rất chậm, ưu tiên quét mép, góc và mặt trước.")
+                        Text(exportSubject == .ultraDetailObject
+                             ? "2. Lia cực chậm, ưu tiên mép, cạnh, bàn phím, viền màn hình."
+                             : "2. Lia rất chậm, ưu tiên quét mép, góc và mặt trước.")
                             .font(.caption2)
                         Text("3. Tránh để vật sát viền ảnh hoặc bị phản chiếu quá mạnh.")
                             .font(.caption2)
