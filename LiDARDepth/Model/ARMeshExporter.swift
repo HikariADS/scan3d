@@ -98,6 +98,12 @@ enum ARMeshExporter {
             case .nearbyObject: return 0.98
             }
         }
+        var atlasFrameCount: Int {
+            switch subject {
+            case .room: return 1
+            case .nearbyObject: return 4
+            }
+        }
         var prefersAggressiveOcclusion: Bool {
             subject == .nearbyObject
         }
@@ -195,10 +201,10 @@ enum ARMeshExporter {
         let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
         guard !preparedMeshes.isEmpty else { return nil }
 
-        let texFrame = bestTextureFrame(from: frames, preparedMeshes: preparedMeshes, profile: profile) ?? frames.last ?? frame
-        guard let textureData = extractJPEG(from: texFrame, quality: profile.textureJPEGQuality) else { return nil }
-        let texW = CGFloat(CVPixelBufferGetWidth(texFrame.capturedImage))
-        let texH = CGFloat(CVPixelBufferGetHeight(texFrame.capturedImage))
+        let atlasFrames = bestTextureFrames(from: frames.isEmpty ? [frame] : frames, preparedMeshes: preparedMeshes, profile: profile)
+        guard let atlas = buildTextureAtlas(from: atlasFrames, quality: profile.textureJPEGQuality) else { return nil }
+        let texW = atlas.size.width
+        let texH = atlas.size.height
 
         var vSection = ""
         var vtSection = ""
@@ -215,9 +221,12 @@ enum ARMeshExporter {
 
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-                if let pt = textureCoordinatePoint(worldPosition: v, normal: n, frame: texFrame, profile: profile) {
-                    u = Float(max(0, min(pt.x / texW, 1)))
-                    vCoord = Float(max(0, min(1 - pt.y / texH, 1)))
+                if let bestProjection = bestTextureProjection(worldPosition: v, normal: n, frames: atlasFrames, profile: profile) {
+                    let tile = atlas.tiles[bestProjection.frameIndex]
+                    let atlasX = tile.origin.x + bestProjection.point.x
+                    let atlasY = tile.origin.y + bestProjection.point.y
+                    u = Float(max(0, min(atlasX / texW, 1)))
+                    vCoord = Float(max(0, min(1 - atlasY / texH, 1)))
                 }
                 vtSection += String(format: "vt %.6f %.6f\n", u, vCoord)
             }
@@ -242,7 +251,7 @@ enum ARMeshExporter {
         illum 1
         map_Kd \(textureFilename)
         """
-        return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: textureData)
+        return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: atlas.jpegData)
     }
 
     private static func extractJPEG(from frame: ARFrame, quality: CGFloat) -> Data? {
@@ -551,6 +560,23 @@ enum ARMeshExporter {
         let indices: [UInt32]
     }
 
+    private struct TextureAtlas {
+        struct Tile {
+            let origin: CGPoint
+            let size: CGSize
+        }
+
+        let jpegData: Data
+        let size: CGSize
+        let tiles: [Tile]
+    }
+
+    private struct TextureProjection {
+        let frameIndex: Int
+        let point: CGPoint
+        let score: Float
+    }
+
     private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
         var result: [PreparedMesh] = []
         let camPos = cameraPosition(frame: frame)
@@ -632,6 +658,82 @@ enum ARMeshExporter {
         return SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
     }
 
+    private static func bestTextureFrames(from frames: [ARFrame], preparedMeshes: [PreparedMesh], profile: ExportProfile) -> [ARFrame] {
+        guard !frames.isEmpty else { return [] }
+        let allPoints = preparedMeshes.flatMap { $0.positions }
+        let samplePoints = allPoints.enumerated().compactMap { idx, p in
+            idx % 18 == 0 ? p : nil
+        }
+        guard !samplePoints.isEmpty else { return [frames.last!]} // safe: frames not empty
+
+        let scored = frames.enumerated().map { frameOrder, frame -> (ARFrame, Float) in
+            let camPos = cameraPosition(frame: frame)
+            let img = frame.capturedImage
+            let w = CVPixelBufferGetWidth(img)
+            let h = CVPixelBufferGetHeight(img)
+            var score: Float = 0
+            var hits = 0
+
+            for p in samplePoints {
+                let normal = simd_normalize(camPos - p)
+                guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: profile) else { continue }
+                let depth = simd_distance(camPos, p)
+                guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else { continue }
+                score += imageBorderWeight(point: pt, width: w, height: h) * (1.0 / (1.0 + 0.35 * depth * depth))
+                hits += 1
+            }
+
+            score += Float(hits) * 0.15
+            score += Float(frameOrder) * 0.03
+            return (frame, score)
+        }
+
+        let unique = scored
+            .sorted { $0.1 > $1.1 }
+            .prefix(max(1, profile.atlasFrameCount))
+            .map { $0.0 }
+        return Array(unique)
+    }
+
+    private static func buildTextureAtlas(from frames: [ARFrame], quality: CGFloat) -> TextureAtlas? {
+        guard !frames.isEmpty else { return nil }
+        let images = frames.compactMap { frame -> UIImage? in
+            let ci = CIImage(cvPixelBuffer: frame.capturedImage)
+            let ctx = CIContext(options: [.useSoftwareRenderer: false])
+            guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
+            return UIImage(cgImage: cg)
+        }
+        guard !images.isEmpty else { return nil }
+
+        let tileW = images.map(\.size.width).max() ?? 0
+        let tileH = images.map(\.size.height).max() ?? 0
+        guard tileW > 0, tileH > 0 else { return nil }
+
+        let columns = images.count == 1 ? 1 : 2
+        let rows = Int(ceil(Double(images.count) / Double(columns)))
+        let atlasSize = CGSize(width: tileW * CGFloat(columns), height: tileH * CGFloat(rows))
+        let renderer = UIGraphicsImageRenderer(size: atlasSize)
+        var tiles: [TextureAtlas.Tile] = []
+        tiles.reserveCapacity(images.count)
+
+        let atlasImage = renderer.image { _ in
+            UIColor.black.setFill()
+            UIBezierPath(rect: CGRect(origin: .zero, size: atlasSize)).fill()
+
+            for (idx, image) in images.enumerated() {
+                let col = idx % columns
+                let row = idx / columns
+                let origin = CGPoint(x: CGFloat(col) * tileW, y: CGFloat(row) * tileH)
+                let rect = CGRect(origin: origin, size: CGSize(width: tileW, height: tileH))
+                image.draw(in: rect)
+                tiles.append(.init(origin: origin, size: rect.size))
+            }
+        }
+
+        guard let jpegData = atlasImage.jpegData(compressionQuality: quality) else { return nil }
+        return TextureAtlas(jpegData: jpegData, size: atlasSize, tiles: tiles)
+    }
+
     private static func triangleIndices(geometry: ARMeshGeometry) -> [UInt32] {
         let faces = geometry.faces
         let triangleCount = faces.count
@@ -685,6 +787,8 @@ enum ARMeshExporter {
         if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.55) }
         var colorAccum = SIMD3<Float>(0, 0, 0)
         var weightAccum: Float = 0
+        var bestColor = SIMD3<Float>(repeating: 0.55)
+        var bestWeight: Float = -.greatestFiniteMagnitude
 
         for (idx, f) in frames.enumerated() {
             guard let (color, weight) = evaluateFrameColor(
@@ -698,11 +802,23 @@ enum ARMeshExporter {
             ) else { continue }
             colorAccum += color * weight
             weightAccum += weight
+            if weight > bestWeight {
+                bestWeight = weight
+                bestColor = color
+            }
         }
 
         if weightAccum > 1e-5 {
             diag?.countColor()
-            return simd_clamp(colorAccum / weightAccum, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+            let fused = simd_clamp(colorAccum / weightAccum, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+            let finalColor: SIMD3<Float>
+            if profile.subject == .nearbyObject, bestWeight > 0 {
+                // Với vật gần, giữ chi tiết màu bằng cách ưu tiên frame tốt nhất hơn là trộn quá mạnh.
+                finalColor = simd_mix(fused, bestColor, SIMD3<Float>(repeating: 0.68))
+            } else {
+                finalColor = fused
+            }
+            return enhanceSampledColor(finalColor, profile: profile)
         }
         diag?.countZeroWeight()
         return SIMD3<Float>(repeating: 0.55)
@@ -748,7 +864,7 @@ enum ARMeshExporter {
             var rescuedPoint: CGPoint?
             if let n = worldNormal {
                 let nn = simd_normalize(n)
-                let offsets: [Float] = [0.003, 0.006, 0.010]
+                let offsets: [Float] = profile.subject == .nearbyObject ? [0.003, 0.006, 0.010, 0.016, 0.024] : [0.003, 0.006, 0.010]
                 for d in offsets {
                     if let p = projectWorldToImagePixel(worldPosition: worldPosition + nn * d, frame: frame) {
                         rescuedPoint = p
@@ -819,7 +935,8 @@ enum ARMeshExporter {
             return true
         }
 
-        let tolerance = max(profile.depthToleranceBase, geometricDepth * profile.depthToleranceScale)
+        let nearbyBoost: Float = profile.subject == .nearbyObject ? 1.35 : 1.0
+        let tolerance = max(profile.depthToleranceBase, geometricDepth * profile.depthToleranceScale) * nearbyBoost
         // Chỉ loại khi depth map cho thấy có vật gần hơn rõ rệt đang che điểm mesh này.
         // Đây là check một chiều nên giữ được nhiều màu hơn so với so tuyệt đối.
         return sampledDepth + tolerance >= geometricDepth
@@ -858,43 +975,27 @@ enum ARMeshExporter {
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
     }
 
-    private static func bestTextureFrame(from frames: [ARFrame], preparedMeshes: [PreparedMesh], profile: ExportProfile) -> ARFrame? {
-        guard !frames.isEmpty else { return nil }
-        let allPoints = preparedMeshes.flatMap { $0.positions }
-        let samplePoints = allPoints.enumerated().compactMap { idx, p in
-            idx % 24 == 0 ? p : nil
-        }
-        guard !samplePoints.isEmpty else { return frames.last }
-
-        var bestFrame: ARFrame?
-        var bestScore: Float = -.greatestFiniteMagnitude
-
-        for (frameOrder, frame) in frames.enumerated() {
+    private static func bestTextureProjection(
+        worldPosition: SIMD3<Float>,
+        normal: SIMD3<Float>,
+        frames: [ARFrame],
+        profile: ExportProfile
+    ) -> TextureProjection? {
+        var best: TextureProjection?
+        for (idx, frame) in frames.enumerated() {
+            guard let pt = textureCoordinatePoint(worldPosition: worldPosition, normal: normal, frame: frame, profile: profile) else { continue }
             let camPos = cameraPosition(frame: frame)
+            let depth = simd_distance(camPos, worldPosition)
             let img = frame.capturedImage
             let w = CVPixelBufferGetWidth(img)
             let h = CVPixelBufferGetHeight(img)
-            var score: Float = 0
-            var hits = 0
-
-            for p in samplePoints {
-                let normal = simd_normalize(camPos - p)
-                guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: profile) else { continue }
-                let depth = simd_distance(camPos, p)
-                guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else { continue }
-                let border = imageBorderWeight(point: pt, width: w, height: h)
-                score += border * (1.0 / (1.0 + depth * depth))
-                hits += 1
-            }
-
-            score += Float(hits) * 0.1
-            score += Float(frameOrder) * 0.02
-            if score > bestScore {
-                bestScore = score
-                bestFrame = frame
+            let border = imageBorderWeight(point: pt, width: w, height: h)
+            let score = border * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.01
+            if best == nil || score > best!.score {
+                best = TextureProjection(frameIndex: idx, point: pt, score: score)
             }
         }
-        return bestFrame
+        return best
     }
 
     private static func textureCoordinatePoint(
@@ -915,6 +1016,16 @@ enum ARMeshExporter {
         let ndotl = abs(simd_dot(simd_normalize(normal), simd_normalize(camPos - worldPosition)))
         guard ndotl >= (profile.prefersAggressiveOcclusion ? 0.02 : 0.01) else { return nil }
         return pt
+    }
+
+    private static func enhanceSampledColor(_ color: SIMD3<Float>, profile: ExportProfile) -> SIMD3<Float> {
+        let luminance = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
+        let gray = SIMD3<Float>(repeating: luminance)
+        let saturationBoost: Float = profile.subject == .nearbyObject ? 1.38 : 1.12
+        let contrastBoost: Float = profile.subject == .nearbyObject ? 1.10 : 1.04
+        let boostedSat = gray + (color - gray) * saturationBoost
+        let boostedContrast = (boostedSat - SIMD3<Float>(repeating: 0.5)) * contrastBoost + SIMD3<Float>(repeating: 0.5)
+        return simd_clamp(boostedContrast, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
     }
 
     private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
@@ -1013,7 +1124,7 @@ enum ARMeshExporter {
         )
         let overshootX = abs(manual.x - clamped.x)
         let overshootY = abs(manual.y - clamped.y)
-        if max(overshootX, overshootY) <= 24 {
+        if max(overshootX, overshootY) <= 64 {
             return clamped
         }
         return nil
