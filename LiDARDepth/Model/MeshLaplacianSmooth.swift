@@ -18,6 +18,7 @@ enum MeshLaplacianSmooth {
     // MARK: - Quality presets
 
     enum QualityPreset: String, CaseIterable, Identifiable {
+        case precise
         case low
         case medium
         case high
@@ -26,6 +27,7 @@ enum MeshLaplacianSmooth {
 
         var displayName: String {
             switch self {
+            case .precise: return "Chính xác"
             case .low:    return "Taubin (Fast)"
             case .medium: return "Bilateral"
             case .high:   return "Bilateral+"
@@ -36,6 +38,8 @@ enum MeshLaplacianSmooth {
     // MARK: - Smoothing mode
 
     enum SmoothingMode {
+        /// Keep raw mesh positions.
+        case none
         /// Classic Taubin λ/μ — fast, low memory, slight shrinkage.
         case taubin
         /// Feature-preserving bilateral — preserves corners/edges, heavier compute.
@@ -65,12 +69,15 @@ enum MeshLaplacianSmooth {
     static var exportHoleMaxRadius: Float           = 0.10
     static var exportHoleMaxPlanarDeviation: Float  = 0.012
     static var exportHoleMaxLargeEdges: Int         = 180
+    static var exportHoleFillEnabled: Bool          = true
 
     // MARK: - Main dispatch
 
     /// Applies the currently-configured smoothing mode to the mesh.
     static func smooth(positions: inout [SIMD3<Float>], triangleIndices: [UInt32]) {
         switch smoothingMode {
+        case .none:
+            return
         case .taubin:
             smoothTaubin(positions: &positions, triangleIndices: triangleIndices)
 
@@ -203,6 +210,20 @@ enum MeshLaplacianSmooth {
 
     static func applyPreset(_ preset: QualityPreset) {
         switch preset {
+        case .precise:
+            smoothingMode           = .none
+            exportIterations        = 0
+            exportLambda            = 0
+            exportMu                = 0
+            bilateralIterations     = 0
+            bilateralSpatialSigma   = 0.012
+            bilateralNormalSigma    = 0.18
+            exportHoleFillEnabled   = false
+            exportHoleMaxEdges      = 0
+            exportHoleMaxRadius     = 0
+            exportHoleMaxPlanarDeviation = 0
+            exportHoleMaxLargeEdges = 0
+
         case .low:
             smoothingMode           = .taubin
             exportIterations        = 2
@@ -211,6 +232,7 @@ enum MeshLaplacianSmooth {
             bilateralIterations     = 2
             bilateralSpatialSigma   = 0.025
             bilateralNormalSigma    = 0.45
+            exportHoleFillEnabled   = true
             exportHoleMaxEdges      = 26
             exportHoleMaxRadius     = 0.055
             exportHoleMaxPlanarDeviation = 0.008
@@ -224,6 +246,7 @@ enum MeshLaplacianSmooth {
             bilateralIterations     = 3
             bilateralSpatialSigma   = 0.040
             bilateralNormalSigma    = 0.35
+            exportHoleFillEnabled   = true
             exportHoleMaxEdges      = 44
             exportHoleMaxRadius     = 0.10
             exportHoleMaxPlanarDeviation = 0.012
@@ -237,6 +260,7 @@ enum MeshLaplacianSmooth {
             bilateralIterations     = 4
             bilateralSpatialSigma   = 0.050
             bilateralNormalSigma    = 0.30
+            exportHoleFillEnabled   = true
             exportHoleMaxEdges      = 72
             exportHoleMaxRadius     = 0.18
             exportHoleMaxPlanarDeviation = 0.018
@@ -258,7 +282,7 @@ enum MeshLaplacianSmooth {
         maxLargeEdges: Int     = MeshLaplacianSmooth.exportHoleMaxLargeEdges
     ) {
         let vertexCount = positions.count
-        guard vertexCount > 2, triangleIndices.count >= 3 else { return }
+        guard exportHoleFillEnabled, vertexCount > 2, triangleIndices.count >= 3 else { return }
 
         var orientedEdges: [(Int, Int)] = []
         var undirectedEdgeCount: [UInt64: Int] = [:]

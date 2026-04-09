@@ -39,6 +39,11 @@ struct LiDARMeshScanView: UIViewRepresentable {
         if supportsMesh {
             config.sceneReconstruction = .mesh
         }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
+        } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+        }
         context.coordinator.trackingConfiguration = config
 
         arView.environment.lighting.intensityExponent = 1
@@ -242,7 +247,7 @@ struct LiDARMeshScanContainer: View {
     @State private var exportURLs: [URL] = []
     @State private var isExporting = false
     @State private var arViewRef: ARView?
-    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .medium
+    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .precise
     @State private var scanProgress: Double = 0
     @State private var scanStageText: String = "Đang khởi động mesh..."
     @State private var isMovingTooFast: Bool = false

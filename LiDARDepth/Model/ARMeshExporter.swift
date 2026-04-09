@@ -648,6 +648,11 @@ enum ARMeshExporter {
         let pb = frame.capturedImage
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
+        let geometricDepth = dist
+        if !passesDepthConsistency(frame: frame, projected: projected, imageWidth: w, imageHeight: h, geometricDepth: geometricDepth) {
+            diag?.countOutOfBounds()
+            return nil
+        }
         let sampled = sampleRGB5Tap(pixelBuffer: pb, at: projected, width: w, height: h)
 
         // Normals của ARMesh sau smooth/fill có thể đảo hướng cục bộ.
@@ -667,6 +672,32 @@ enum ARMeshExporter {
             return nil
         }
         return (sampled, weight)
+    }
+
+    /// Ngăn màu của vật gần "in" sang nền xa phía sau bằng cách so độ sâu mesh và sceneDepth.
+    /// Nếu depth map tại pixel cho thấy có vật gần hơn đáng kể, bỏ sample màu này.
+    private static func passesDepthConsistency(
+        frame: ARFrame,
+        projected: CGPoint,
+        imageWidth: Int,
+        imageHeight: Int,
+        geometricDepth: Float
+    ) -> Bool {
+        let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth
+        guard let depthMap = sceneDepth?.depthMap else { return true }
+        let depthW = CVPixelBufferGetWidth(depthMap)
+        let depthH = CVPixelBufferGetHeight(depthMap)
+        guard depthW > 1, depthH > 1, imageWidth > 1, imageHeight > 1 else { return true }
+
+        let dx = projected.x / CGFloat(imageWidth) * CGFloat(depthW)
+        let dy = projected.y / CGFloat(imageHeight) * CGFloat(depthH)
+        guard let sampledDepth = sampleDepthBilinear(pixelBuffer: depthMap, x: dx, y: dy, width: depthW, height: depthH) else {
+            return true
+        }
+
+        // Cho phép sai số tăng nhẹ theo khoảng cách để không loại oan điểm xa.
+        let tolerance = max(0.06, geometricDepth * 0.08)
+        return abs(sampledDepth - geometricDepth) <= tolerance
     }
 
     private static func sampleRGB5Tap(pixelBuffer: CVPixelBuffer, at projected: CGPoint, width: Int, height: Int) -> SIMD3<Float> {
@@ -700,6 +731,53 @@ enum ARMeshExporter {
             return sampleBGRABilinear(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
         }
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
+    }
+
+    private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
+        let xf = max(0, min(Float(x), Float(width) - 1 - 1e-4))
+        let yf = max(0, min(Float(y), Float(height) - 1 - 1e-4))
+        let x0 = Int(floor(xf))
+        let y0 = Int(floor(yf))
+        let x1 = min(x0 + 1, width - 1)
+        let y1 = min(y0 + 1, height - 1)
+        let tx = xf - Float(x0)
+        let ty = yf - Float(y0)
+
+        guard let d00 = sampleDepthPoint(pixelBuffer: pixelBuffer, x: x0, y: y0),
+              let d10 = sampleDepthPoint(pixelBuffer: pixelBuffer, x: x1, y: y0),
+              let d01 = sampleDepthPoint(pixelBuffer: pixelBuffer, x: x0, y: y1),
+              let d11 = sampleDepthPoint(pixelBuffer: pixelBuffer, x: x1, y: y1) else {
+            return nil
+        }
+        let d0 = d00 * (1 - tx) + d10 * tx
+        let d1 = d01 * (1 - tx) + d11 * tx
+        let d = d0 * (1 - ty) + d1 * ty
+        return d.isFinite && d > 0 ? d : nil
+    }
+
+    private static func sampleDepthPoint(pixelBuffer: CVPixelBuffer, x: Int, y: Int) -> Float? {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+
+        let format = CVPixelBufferGetPixelFormatType(pixelBuffer)
+        if format == kCVPixelFormatType_DepthFloat32 {
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: Float32.self) else {
+                return nil
+            }
+            let row = CVPixelBufferGetBytesPerRow(pixelBuffer) / MemoryLayout<Float32>.stride
+            let v = Float(base[y * row + x])
+            return v.isFinite && v > 0 ? v : nil
+        }
+        if format == kCVPixelFormatType_DepthFloat16 {
+            guard let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: UInt16.self) else {
+                return nil
+            }
+            let row = CVPixelBufferGetBytesPerRow(pixelBuffer) / MemoryLayout<UInt16>.stride
+            let bits = base[y * row + x]
+            let v = Float(Float16(bitPattern: bits))
+            return v.isFinite && v > 0 ? v : nil
+        }
+        return nil
     }
 
     /// World → pixel trên `capturedImage`.
