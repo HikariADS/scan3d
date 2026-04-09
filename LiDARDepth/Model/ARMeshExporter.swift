@@ -108,7 +108,7 @@ enum ARMeshExporter {
             switch subject {
             case .room: return 1
             case .nearbyObject: return 4
-            case .ultraDetailObject: return 9
+            case .ultraDetailObject: return 16
             }
         }
         var prefersAggressiveOcclusion: Bool {
@@ -118,7 +118,7 @@ enum ARMeshExporter {
             switch subject {
             case .room: return 0.0
             case .nearbyObject: return 0.35
-            case .ultraDetailObject: return 0.75
+            case .ultraDetailObject: return 1.10
             }
         }
         var bestFrameBlend: Float {
@@ -163,8 +163,8 @@ enum ARMeshExporter {
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
     private static var frameHistory: [ARFrame] = []
     // Giữ nhiều frame hơn để tăng độ phủ màu và texture khi export vật gần.
-    private static let maxHistoryFrames = 24
-    private static let maxFusionFrames = 16
+    private static let maxHistoryFrames = 64
+    private static let maxFusionFrames = 32
 
     static func recordFrameForColorFusion(_ frame: ARFrame) {
         historyQueue.sync {
@@ -744,7 +744,7 @@ enum ARMeshExporter {
         detailPatches: [DetailPatch]
     ) -> ExportProfile {
         for patch in detailPatches {
-            if simd_distance(position, patch.center) <= patch.radius {
+            if simd_distance(position, patch.center) <= patch.radius * 1.35 {
                 return ExportProfile(subject: .ultraDetailObject)
             }
         }
@@ -766,6 +766,7 @@ enum ARMeshExporter {
 
         let effectiveAtlasCount = max(profile.atlasFrameCount, detailPatches.isEmpty ? 0 : ExportProfile(subject: .ultraDetailObject).atlasFrameCount)
         let patchCenters = detailPatches.map(\.center)
+        let patchRadii = detailPatches.map(\.radius)
 
         let scored = frames.enumerated().map { frameOrder, frame -> (ARFrame, Float) in
             let camPos = cameraPosition(frame: frame)
@@ -787,9 +788,12 @@ enum ARMeshExporter {
                 hits += 1
             }
 
-            for centerPos in patchCenters {
+            for (idx, centerPos) in patchCenters.enumerated() {
                 let d = simd_distance(camPos, centerPos)
-                score += 0.4 / (1.0 + d * d)
+                let patchRadius = idx < patchRadii.count ? patchRadii[idx] : 0.7
+                let proximity = max(0, 1 - d / max(patchRadius * 2.5, 0.25))
+                score += 1.1 * proximity
+                score += 0.7 / (1.0 + 0.6 * d * d)
             }
 
             score += Float(hits) * 0.15
@@ -797,10 +801,8 @@ enum ARMeshExporter {
             return (frame, score)
         }
 
-        let unique = scored
-            .sorted { $0.1 > $1.1 }
-            .prefix(max(1, effectiveAtlasCount))
-            .map { $0.0 }
+        let sorted = scored.sorted { $0.1 > $1.1 }
+        let unique = sorted.prefix(max(1, effectiveAtlasCount)).map { $0.0 }
         return Array(unique)
     }
 

@@ -482,9 +482,9 @@ struct LiDARMeshScanContainer: View {
                     .font(.caption.bold())
                 Text("1. Giữ vùng cần tăng chi tiết ở giữa khung hình.")
                     .font(.caption2)
-                Text("2. Với patch quan trọng, giữ khoảng cách khoảng 20-45cm và quét cực chậm.")
+                Text("2. Với patch quan trọng, giữ khoảng cách khoảng 20-45cm và quét cực chậm trong 1-2 vòng ngắn.")
                     .font(.caption2)
-                Text("3. Ưu tiên mép, bàn phím, màn hình, mặt bàn và vật thể chính.")
+                Text("3. Ưu tiên mép, bàn phím, màn hình, mặt bàn và vật thể chính; giữ vùng đó lớn trong khung.")
                     .font(.caption2)
                 Text("4. Export cuối sẽ giữ full phòng nhưng vá texture mạnh hơn trong các patch đã đánh dấu.")
                     .font(.caption2)
@@ -522,7 +522,7 @@ struct LiDARMeshScanContainer: View {
         let index = detailPatches.count + 1
         let patch = ARMeshExporter.DetailPatch(
             center: patchCenter,
-            radius: workflowMode == .detailPatch ? 0.65 : 0.75,
+            radius: workflowMode == .detailPatch ? 0.9 : 1.0,
             label: "Patch \(index)"
         )
         detailPatches.append(patch)
