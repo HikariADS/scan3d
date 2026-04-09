@@ -204,7 +204,6 @@ enum ARMeshExporter {
     // MARK: - Colored OBJ + PLY
 
     private static func buildColoredOBJString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
-        let orientation = activeInterfaceOrientation()
         var obj = "# LiDARDepth — vertex RGB (0–1); đỉnh đã qua Laplacian mịn (MeshLaplacianSmooth). Xcode OBJ: mở .glb/.ply để xem màu.\n"
         var vertexBase = 1
         var normalBase = 1
@@ -220,7 +219,7 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, orientation: orientation)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
                 obj += String(format: "v %.6f %.6f %.6f %.6f %.6f %.6f\n", v.x, v.y, v.z, c.x, c.y, c.z)
             }
 
@@ -245,7 +244,6 @@ enum ARMeshExporter {
     }
 
     private static func buildColoredPLYString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
-        let orientation = activeInterfaceOrientation()
         var positions: [SIMD3<Float>] = []
         var colors: [SIMD3<Float>] = []
         var faces: [(Int, Int, Int)] = []
@@ -261,7 +259,7 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, orientation: orientation)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
                 positions.append(v)
                 colors.append(c)
             }
@@ -300,7 +298,6 @@ enum ARMeshExporter {
     // MARK: - glTF 2.0 GLB (faceted, per-triangle color)
 
     private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> Data? {
-        let orientation = activeInterfaceOrientation()
         var positions: [Float] = []
         var normals: [Float] = []
         var colors: [Float] = []
@@ -325,7 +322,7 @@ enum ARMeshExporter {
                 guard ln >= 1e-8 else { continue }
                 fn = fn / ln
                 let center = (p0 + p1 + p2) * (1.0 / 3.0)
-                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame, orientation: orientation)
+                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame)
                 for p in [p0, p1, p2] {
                     positions.append(contentsOf: [p.x, p.y, p.z])
                     normals.append(contentsOf: [fn.x, fn.y, fn.z])
@@ -497,7 +494,7 @@ enum ARMeshExporter {
     /// - Distance weight
     /// - Border confidence
     /// - 5-tap pixel sampling to reduce sensor noise
-    private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, orientation: UIInterfaceOrientation) -> SIMD3<Float> {
+    private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame) -> SIMD3<Float> {
         let frames = fusionFrames(including: frame)
         var colorAccum = SIMD3<Float>(0, 0, 0)
         var weightAccum: Float = 0
@@ -508,8 +505,7 @@ enum ARMeshExporter {
                 frameOrder: idx,
                 totalFrames: frames.count,
                 worldPosition: worldPosition,
-                worldNormal: worldNormal,
-                orientation: orientation
+                worldNormal: worldNormal
             ) else { continue }
             colorAccum += color * weight
             weightAccum += weight
@@ -526,8 +522,7 @@ enum ARMeshExporter {
         frameOrder: Int,
         totalFrames: Int,
         worldPosition: SIMD3<Float>,
-        worldNormal: SIMD3<Float>?,
-        orientation: UIInterfaceOrientation
+        worldNormal: SIMD3<Float>?
     ) -> (SIMD3<Float>, Float)? {
         let cam = frame.camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
         if cam.z > -0.01 {
@@ -553,13 +548,12 @@ enum ARMeshExporter {
         }
 
         let projected: CGPoint
-        if let p = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame, orientation: orientation) {
+        if let p = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame) {
             projected = p
         } else if let n = worldNormal,
                   let p = projectWorldToImagePixel(
                     worldPosition: worldPosition + simd_normalize(n) * 0.004,
-                    frame: frame,
-                    orientation: orientation
+                    frame: frame
                   ) {
             projected = p
         } else {
@@ -616,18 +610,29 @@ enum ARMeshExporter {
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
     }
 
-    /// World → điểm trên `capturedImage` để lấy mẫu YUV/BGRA.
-    /// `projectPoint` cho tọa độ viewport (đúng orientation); `displayTransform` nối viewport → buffer pixel (sensor thường “ngang” so với cầm dọc).
-    private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, frame: ARFrame, orientation: UIInterfaceOrientation) -> CGPoint? {
+    /// World → pixel trên `capturedImage` (buffer YUV/BGRA của sensor).
+    /// Dùng intrinsics trực tiếp: tránh displayTransform (dành cho render viewport, không phải buffer pixel).
+    private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, frame: ARFrame) -> CGPoint? {
         let camera = frame.camera
-        let p = camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
-        if p.z > -0.01 { return nil }
+        // Chuyển về camera space
+        let camSpaceH = camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
+        let camZ = camSpaceH.z
+        if camZ > -0.01 { return nil }  // Điểm sau camera
 
-        let resolution = camera.imageResolution
-        let viewport = CGSize(width: resolution.width, height: resolution.height)
-        let viewPoint = camera.projectPoint(worldPosition, orientation: orientation, viewportSize: viewport)
-        let displayTransform = frame.displayTransform(for: orientation, viewportSize: viewport)
-        return viewPoint.applying(displayTransform.inverted())
+        // Intrinsics — đơn vị pixel trên capturedImage (imageResolution)
+        let K = camera.intrinsics          // column-major: K[col][row]
+        let fx = K[0][0]; let fy = K[1][1]
+        let cx = K[2][0]; let cy = K[2][1]
+
+        // Chiếu: u = fx * (X/Z) + cx, v = fy * (Y/Z) + cy  (Z âm → dùng -Z)
+        let X = camSpaceH.x; let Y = camSpaceH.y; let Z = -camZ   // Z dương
+        let u = CGFloat(fx * X / Z + cx)
+        let v = CGFloat(fy * Y / Z + cy)
+
+        let w = frame.camera.imageResolution.width
+        let h = frame.camera.imageResolution.height
+        guard u >= 0 && u < CGFloat(w) && v >= 0 && v < CGFloat(h) else { return nil }
+        return CGPoint(x: u, y: v)
     }
 
     private static func sampleYUVBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int, fullRange: Bool) -> SIMD3<Float> {
