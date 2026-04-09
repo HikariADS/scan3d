@@ -305,6 +305,28 @@ struct LiDARMeshScanContainer: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
 
+                if exportSubject == .nearbyObject {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Hướng dẫn quét vật gần")
+                            .font(.caption.bold())
+                        Text("1. Giữ vật ở giữa khung hình, cách khoảng 25-70cm.")
+                            .font(.caption2)
+                        Text("2. Lia rất chậm, ưu tiên quét mép, góc và mặt trước.")
+                            .font(.caption2)
+                        Text("3. Tránh để vật sát viền ảnh hoặc bị phản chiếu quá mạnh.")
+                            .font(.caption2)
+                        Text("4. Nếu log còn out of bounds cao, hãy giữ vật lớn hơn trong khung.")
+                            .font(.caption2)
+                        Text("5. Nếu depth mismatch cao, hãy giảm lia nhanh và bớt góc xiên.")
+                            .font(.caption2)
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                }
+
                 Picker("Độ mịn", selection: $smoothingPreset) {
                     ForEach(MeshLaplacianSmooth.QualityPreset.allCases) { preset in
                         Text(preset.displayName).tag(preset)

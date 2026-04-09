@@ -18,6 +18,7 @@ private final class ColorDiag: @unchecked Sendable {
     private var _fallbackBehindCam = 0
     private var _fallbackBackface = 0
     private var _fallbackOutOfBounds = 0
+    private var _fallbackDepthMismatch = 0
     private var _fallbackNoFrames = 0
     private var _fallbackZeroWeight = 0
 
@@ -26,6 +27,7 @@ private final class ColorDiag: @unchecked Sendable {
     func countBehindCam()        { q.sync { _fallbackBehindCam += 1 } }
     func countBackface()         { q.sync { _fallbackBackface += 1 } }
     func countOutOfBounds()      { q.sync { _fallbackOutOfBounds += 1 } }
+    func countDepthMismatch()    { q.sync { _fallbackDepthMismatch += 1 } }
     func countNoFrames()         { q.sync { _fallbackNoFrames += 1 } }
     func countZeroWeight()       { q.sync { _fallbackZeroWeight += 1 } }
 
@@ -40,7 +42,8 @@ private final class ColorDiag: @unchecked Sendable {
     behind cam   : \(_fallbackBehindCam)
     backface ext  : \(_fallbackBackface)
     out of bounds : \(_fallbackOutOfBounds)
-    zero weight   : \(_fallbackZeroWeight)
+    depth mismatch: \(_fallbackDepthMismatch)
+    weight thap   : \(_fallbackZeroWeight)
     no frames     : \(_fallbackNoFrames)
 """)
         }
@@ -769,7 +772,7 @@ enum ARMeshExporter {
         let h = CVPixelBufferGetHeight(pb)
         let geometricDepth = dist
         if !passesDepthConsistency(frame: frame, projected: projected, imageWidth: w, imageHeight: h, geometricDepth: geometricDepth, profile: profile) {
-            diag?.countOutOfBounds()
+            diag?.countDepthMismatch()
             return nil
         }
         let sampled = sampleRGB5Tap(pixelBuffer: pb, at: projected, width: w, height: h)
