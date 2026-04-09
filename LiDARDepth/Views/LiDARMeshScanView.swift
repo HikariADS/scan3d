@@ -130,7 +130,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
                 frame.camera.transform.columns.3.z
             )
 
-            let recordDistanceThreshold: Float = parent.exportSubject == .nearbyObject ? 0.015 : 0.03
+            let recordDistanceThreshold: Float = parent.exportSubject == .nearbyObject ? 0.008 : 0.03
             if let last = lastRecordedCamPos {
                 if simd_length(camPos - last) >= recordDistanceThreshold {
                     ARMeshExporter.recordFrameForColorFusion(frame)
@@ -152,9 +152,9 @@ struct LiDARMeshScanView: UIViewRepresentable {
             lastSpeedTimestamp = frame.timestamp
             lastSpeedCamPos = camPos
 
-            let tooFast = speed > (parent.exportSubject == .nearbyObject ? 0.22 : 0.45)
+            let tooFast = speed > (parent.exportSubject == .nearbyObject ? 0.18 : 0.45)
             let triangles = cachedTriangleCount
-            let triangleTarget = parent.exportSubject == .nearbyObject ? 28_000.0 : 80_000.0
+            let triangleTarget = parent.exportSubject == .nearbyObject ? 45_000.0 : 80_000.0
             let densityProgress = min(Double(triangles) / triangleTarget, 1.0)
             let stabilityPenalty: Double = tooFast ? 0.15 : 0
             let finalProgress = max(0, min(1, densityProgress - stabilityPenalty))

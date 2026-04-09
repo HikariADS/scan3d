@@ -74,19 +74,19 @@ enum ARMeshExporter {
         var objectMaxDistance: Float {
             switch subject {
             case .room: return 6.0
-            case .nearbyObject: return 1.35
+            case .nearbyObject: return 2.2
             }
         }
         var depthToleranceBase: Float {
             switch subject {
             case .room: return 0.06
-            case .nearbyObject: return 0.035
+            case .nearbyObject: return 0.05
             }
         }
         var depthToleranceScale: Float {
             switch subject {
             case .room: return 0.08
-            case .nearbyObject: return 0.05
+            case .nearbyObject: return 0.08
             }
         }
         var textureJPEGQuality: CGFloat {
@@ -104,10 +104,9 @@ enum ARMeshExporter {
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
     private static var frameHistory: [ARFrame] = []
-    // Giữ nhiều frame hơn để tăng độ phủ màu khi export.
-    // Vẫn giới hạn tương đối thấp để tránh giữ quá nhiều camera image trong RAM.
-    private static let maxHistoryFrames = 12
-    private static let maxFusionFrames = 8
+    // Giữ nhiều frame hơn để tăng độ phủ màu và texture khi export vật gần.
+    private static let maxHistoryFrames = 24
+    private static let maxFusionFrames = 16
 
     static func recordFrameForColorFusion(_ frame: ARFrame) {
         historyQueue.sync {
@@ -594,15 +593,6 @@ enum ARMeshExporter {
                 continue
             }
 
-            let viewDir = simd_normalize(cameraPosition - center)
-            let avgNormal = simd_normalize(normals[i0] + normals[i1] + normals[i2])
-            if simd_length_squared(avgNormal) > 1e-6 {
-                let facing = abs(simd_dot(avgNormal, viewDir))
-                if facing < 0.08 {
-                    continue
-                }
-            }
-
             keptVertices.insert(i0)
             keptVertices.insert(i1)
             keptVertices.insert(i2)
@@ -791,11 +781,11 @@ enum ARMeshExporter {
             diag?.countBackface()
         }
         let angleWeight = max(0.35, min(1.0, 0.35 + 0.65 * facing))
-        let distanceScale: Float = profile.subject == .nearbyObject ? 1.15 : 0.65
+        let distanceScale: Float = profile.subject == .nearbyObject ? 0.45 : 0.65
         let distanceWeight = 1.0 / (1.0 + distanceScale * dist * dist)
         let borderWeight = imageBorderWeight(point: projected, width: w, height: h)
         let recency = Float(frameOrder + 1) / Float(max(totalFrames, 1))
-        let temporalWeight = 0.65 + 0.35 * recency
+        let temporalWeight = profile.subject == .nearbyObject ? (0.75 + 0.25 * recency) : (0.65 + 0.35 * recency)
         let weight = angleWeight * distanceWeight * borderWeight * temporalWeight
         if weight < 1e-5 {
             diag?.countZeroWeight()
@@ -826,9 +816,10 @@ enum ARMeshExporter {
             return true
         }
 
-        // Cho phép sai số tăng nhẹ theo khoảng cách để không loại oan điểm xa.
         let tolerance = max(profile.depthToleranceBase, geometricDepth * profile.depthToleranceScale)
-        return abs(sampledDepth - geometricDepth) <= tolerance
+        // Chỉ loại khi depth map cho thấy có vật gần hơn rõ rệt đang che điểm mesh này.
+        // Đây là check một chiều nên giữ được nhiều màu hơn so với so tuyệt đối.
+        return sampledDepth + tolerance >= geometricDepth
     }
 
     private static func sampleRGB5Tap(pixelBuffer: CVPixelBuffer, at projected: CGPoint, width: Int, height: Int) -> SIMD3<Float> {
@@ -919,7 +910,7 @@ enum ARMeshExporter {
             return nil
         }
         let ndotl = abs(simd_dot(simd_normalize(normal), simd_normalize(camPos - worldPosition)))
-        guard ndotl >= (profile.prefersAggressiveOcclusion ? 0.15 : 0.05) else { return nil }
+        guard ndotl >= (profile.prefersAggressiveOcclusion ? 0.02 : 0.01) else { return nil }
         return pt
     }
 
