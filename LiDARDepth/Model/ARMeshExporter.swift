@@ -102,8 +102,6 @@ enum ARMeshExporter {
         guard let textureData = extractJPEG(from: bestFrame) else { return nil }
         let texW = CVPixelBufferGetWidth(bestFrame.capturedImage)
         let texH = CVPixelBufferGetHeight(bestFrame.capturedImage)
-        let orientation = activeInterfaceOrientation()
-
         var vLines = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
         var vtLines = ""
         var vnLines = ""
@@ -127,7 +125,7 @@ enum ARMeshExporter {
                 // Project vertex → camera image → normalized UV [0,1].
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-                if let pt = projectWorldToImagePixel(worldPosition: v, frame: bestFrame, orientation: orientation) {
+                if let pt = projectWorldToImagePixel(worldPosition: v, frame: bestFrame) {
                     u = Float(max(0, min(pt.x / CGFloat(texW), 1)))
                     // Flip Y: OBJ UV origin is bottom-left; image origin is top-left.
                     vCoord = Float(max(0, min(1 - pt.y / CGFloat(texH), 1)))
