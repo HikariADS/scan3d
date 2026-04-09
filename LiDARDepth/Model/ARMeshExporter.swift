@@ -8,6 +8,50 @@ import CoreImage
 import simd
 import UIKit
 
+// MARK: - Debug diagnostics
+
+/// Thread-safe counters cho mỗi lần export. Reset trước mỗi lần build.
+private final class ColorDiag: @unchecked Sendable {
+    private let q = DispatchQueue(label: "ColorDiag")
+    private var _total = 0
+    private var _gotColor = 0
+    private var _fallbackBehindCam = 0
+    private var _fallbackBackface = 0
+    private var _fallbackOutOfBounds = 0
+    private var _fallbackNoFrames = 0
+    private var _fallbackZeroWeight = 0
+
+    func countVertex()           { q.sync { _total += 1} }
+    func countColor()            { q.sync { _gotColor += 1 } }
+    func countBehindCam()        { q.sync { _fallbackBehindCam += 1 } }
+    func countBackface()         { q.sync { _fallbackBackface += 1 } }
+    func countOutOfBounds()      { q.sync { _fallbackOutOfBounds += 1 } }
+    func countNoFrames()         { q.sync { _fallbackNoFrames += 1 } }
+    func countZeroWeight()       { q.sync { _fallbackZeroWeight += 1 } }
+
+    func printSummary(tag: String) {
+        q.sync {
+            let gray = _total - _gotColor
+            print("""
+[ColorDiag] === \(tag) ===
+  Tổng vertices  : \(_total)
+  Có màu thật   : \(_gotColor) (\(pct(_gotColor, _total))%)
+  Xám fallback   : \(gray) (\(pct(gray, _total))%)
+    behind cam   : \(_fallbackBehindCam)
+    backface ext  : \(_fallbackBackface)
+    out of bounds : \(_fallbackOutOfBounds)
+    zero weight   : \(_fallbackZeroWeight)
+    no frames     : \(_fallbackNoFrames)
+""")
+        }
+    }
+
+    private func pct(_ n: Int, _ d: Int) -> String {
+        guard d > 0 else { return "0" }
+        return String(format: "%.1f", Float(n) / Float(d) * 100)
+    }
+}
+
 enum ARMeshExporter {
     // MARK: - Multi-frame color history
 
@@ -202,6 +246,8 @@ enum ARMeshExporter {
     // MARK: - Colored OBJ + PLY
 
     private static func buildColoredOBJString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
+        let diag = ColorDiag()
+        logExportHeader(tag: "OBJ", frame: frame)
         var obj = "# LiDARDepth — vertex RGB (0–1); đỉnh đã qua Laplacian mịn (MeshLaplacianSmooth). Xcode OBJ: mở .glb/.ply để xem màu.\n"
         var vertexBase = 1
         var normalBase = 1
@@ -217,7 +263,8 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag)
+                diag.countVertex()
                 obj += String(format: "v %.6f %.6f %.6f %.6f %.6f %.6f\n", v.x, v.y, v.z, c.x, c.y, c.z)
             }
 
@@ -238,10 +285,13 @@ enum ARMeshExporter {
             vertexBase += verts.count
             normalBase += verts.count
         }
+        diag.printSummary(tag: "OBJ")
         return obj
     }
 
     private static func buildColoredPLYString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
+        let diag = ColorDiag()
+        logExportHeader(tag: "PLY", frame: frame)
         var positions: [SIMD3<Float>] = []
         var colors: [SIMD3<Float>] = []
         var faces: [(Int, Int, Int)] = []
@@ -257,7 +307,8 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normalsSmooth[i]
-                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
+                let c = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame, diag: diag)
+                diag.countVertex()
                 positions.append(v)
                 colors.append(c)
             }
@@ -290,12 +341,15 @@ enum ARMeshExporter {
         for f in faces {
             ply += "3 \(f.0) \(f.1) \(f.2)\n"
         }
+        diag.printSummary(tag: "PLY")
         return ply
     }
 
     // MARK: - glTF 2.0 GLB (faceted, per-triangle color)
 
     private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> Data? {
+        let diag = ColorDiag()
+        logExportHeader(tag: "GLB", frame: frame)
         var positions: [Float] = []
         var normals: [Float] = []
         var colors: [Float] = []
@@ -320,7 +374,8 @@ enum ARMeshExporter {
                 guard ln >= 1e-8 else { continue }
                 fn = fn / ln
                 let center = (p0 + p1 + p2) * (1.0 / 3.0)
-                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame)
+                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame, diag: diag)
+                diag.countVertex()
                 for p in [p0, p1, p2] {
                     positions.append(contentsOf: [p.x, p.y, p.z])
                     normals.append(contentsOf: [fn.x, fn.y, fn.z])
@@ -330,6 +385,7 @@ enum ARMeshExporter {
         }
         let vertexCount = positions.count / 3
         guard vertexCount > 0 else { return nil }
+        diag.printSummary(tag: "GLB")
         return encodeGLB(positions: positions, normals: normals, colors: colors, vertexCount: vertexCount)
     }
 
@@ -492,8 +548,9 @@ enum ARMeshExporter {
     /// - Distance weight
     /// - Border confidence
     /// - 5-tap pixel sampling to reduce sensor noise
-    private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame) -> SIMD3<Float> {
+    private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, diag: ColorDiag? = nil) -> SIMD3<Float> {
         let frames = fusionFrames(including: frame)
+        if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.55) }
         var colorAccum = SIMD3<Float>(0, 0, 0)
         var weightAccum: Float = 0
 
@@ -503,15 +560,18 @@ enum ARMeshExporter {
                 frameOrder: idx,
                 totalFrames: frames.count,
                 worldPosition: worldPosition,
-                worldNormal: worldNormal
+                worldNormal: worldNormal,
+                diag: diag
             ) else { continue }
             colorAccum += color * weight
             weightAccum += weight
         }
 
         if weightAccum > 1e-5 {
+            diag?.countColor()
             return simd_clamp(colorAccum / weightAccum, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
         }
+        diag?.countZeroWeight()
         return SIMD3<Float>(repeating: 0.55)
     }
 
@@ -520,10 +580,12 @@ enum ARMeshExporter {
         frameOrder: Int,
         totalFrames: Int,
         worldPosition: SIMD3<Float>,
-        worldNormal: SIMD3<Float>?
+        worldNormal: SIMD3<Float>?,
+        diag: ColorDiag? = nil
     ) -> (SIMD3<Float>, Float)? {
         let cam = frame.camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
         if cam.z > -0.01 {
+            diag?.countBehindCam()
             return nil
         }
 
@@ -532,6 +594,7 @@ enum ARMeshExporter {
         let toCameraVec = camPos - worldPosition
         let dist = simd_length(toCameraVec)
         if dist < 1e-4 {
+            diag?.countBehindCam()
             return nil
         }
         let toCamera = toCameraVec / dist
@@ -540,7 +603,10 @@ enum ARMeshExporter {
         if let n = worldNormal {
             ndotl = simd_dot(simd_normalize(n), toCamera)
             // Reject only extreme backface
-            if ndotl < -0.9 { return nil }
+            if ndotl < -0.9 {
+                diag?.countBackface()
+                return nil
+            }
         } else {
             ndotl = 0.5
         }
@@ -555,6 +621,7 @@ enum ARMeshExporter {
                   ) {
             projected = p
         } else {
+            diag?.countOutOfBounds()
             return nil
         }
 
@@ -570,6 +637,7 @@ enum ARMeshExporter {
         let temporalWeight = 0.65 + 0.35 * recency
         let weight = angleWeight * distanceWeight * borderWeight * temporalWeight
         if weight < 1e-5 {
+            diag?.countZeroWeight()
             return nil
         }
         return (sampled, weight)
@@ -631,6 +699,31 @@ enum ARMeshExporter {
         let h = frame.camera.imageResolution.height
         guard u >= 0 && u < CGFloat(w) && v >= 0 && v < CGFloat(h) else { return nil }
         return CGPoint(x: u, y: v)
+    }
+
+    /// Log thông tin frame và pixel format trước khi export.
+    private static func logExportHeader(tag: String, frame: ARFrame) {
+        let fusionCount = fusionFrames(including: frame).count
+        let pb = frame.capturedImage
+        let fmt = CVPixelBufferGetPixelFormatType(pb)
+        let fmtName: String
+        switch fmt {
+        case kCVPixelFormatType_420YpCbCr8BiPlanarFullRange:  fmtName = "420f (YUV full)"
+        case kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange: fmtName = "420v (YUV video)"
+        case kCVPixelFormatType_32BGRA:                        fmtName = "BGRA32"
+        default:                                               fmtName = String(format: "0x%08X", fmt)
+        }
+        let imgW = CVPixelBufferGetWidth(pb)
+        let imgH = CVPixelBufferGetHeight(pb)
+        let K = frame.camera.intrinsics
+        print("""
+[ColorDiag] --- \(tag) Export bắt đầu ---
+  Fusion frames  : \(fusionCount)
+  Pixel format   : \(fmtName)
+  Buffer size    : \(imgW) x \(imgH)
+  Intrinsics fx/fy: \(K[0][0]) / \(K[1][1])
+  Intrinsics cx/cy: \(K[2][0]) / \(K[2][1])
+""")
     }
 
     private static func sampleYUVBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int, fullRange: Bool) -> SIMD3<Float> {
