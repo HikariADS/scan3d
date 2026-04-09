@@ -1,6 +1,9 @@
 /*
  Abstract:
- Polycam-style room scan: ARKit world tracking + scene mesh reconstruction, preview, export.
+ Product-oriented room scan workflow:
+ 1. Room Base
+ 2. Detail Patch capture
+ 3. Fusion Export
  */
 
 import SwiftUI
@@ -66,7 +69,6 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.parent = self
-
         guard let config = context.coordinator.trackingConfiguration else { return }
 
         if isTabActive {
@@ -93,10 +95,8 @@ struct LiDARMeshScanView: UIViewRepresentable {
         private var meshAnchorsByID: [UUID: ARMeshAnchor] = [:]
         private var cachedAnchorCount = 0
         private var cachedTriangleCount = 0
-
         private var lastUIUpdateTime: TimeInterval = 0
         private let uiUpdateInterval: TimeInterval = 0.25
-
         private var lastRecordedCamPos: SIMD3<Float>?
         private var lastSpeedTimestamp: TimeInterval?
         private var lastSpeedCamPos: SIMD3<Float>?
@@ -132,13 +132,11 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
             let recordDistanceThreshold: Float
             switch parent.exportSubject {
-            case .room:
-                recordDistanceThreshold = 0.03
-            case .nearbyObject:
-                recordDistanceThreshold = 0.008
-            case .ultraDetailObject:
-                recordDistanceThreshold = 0.004
+            case .room: recordDistanceThreshold = 0.03
+            case .nearbyObject: recordDistanceThreshold = 0.008
+            case .ultraDetailObject: recordDistanceThreshold = 0.004
             }
+
             if let last = lastRecordedCamPos {
                 if simd_length(camPos - last) >= recordDistanceThreshold {
                     ARMeshExporter.recordFrameForColorFusion(frame)
@@ -161,24 +159,20 @@ struct LiDARMeshScanView: UIViewRepresentable {
             lastSpeedCamPos = camPos
 
             let tooFast: Bool
-            switch parent.exportSubject {
-            case .room:
-                tooFast = speed > 0.45
-            case .nearbyObject:
-                tooFast = speed > 0.18
-            case .ultraDetailObject:
-                tooFast = speed > 0.10
-            }
-            let triangles = cachedTriangleCount
             let triangleTarget: Double
             switch parent.exportSubject {
             case .room:
+                tooFast = speed > 0.45
                 triangleTarget = 80_000
             case .nearbyObject:
+                tooFast = speed > 0.18
                 triangleTarget = 45_000
             case .ultraDetailObject:
+                tooFast = speed > 0.10
                 triangleTarget = 65_000
             }
+
+            let triangles = cachedTriangleCount
             let densityProgress = min(Double(triangles) / triangleTarget, 1.0)
             let stabilityPenalty: Double = tooFast ? 0.15 : 0
             let finalProgress = max(0, min(1, densityProgress - stabilityPenalty))
@@ -187,13 +181,29 @@ struct LiDARMeshScanView: UIViewRepresentable {
             if triangles == 0 {
                 stage = "Đang khởi động mesh..."
             } else if finalProgress < 0.25 {
-                stage = parent.exportSubject == .nearbyObject ? "Bước 1/4: Tiến gần vật thể" : "Bước 1/4: Quét khung tổng thể"
+                switch parent.exportSubject {
+                case .room: stage = "Bước 1/4: Quét khung tổng thể"
+                case .nearbyObject: stage = "Bước 1/4: Tiến gần vật thể"
+                case .ultraDetailObject: stage = "Bước 1/4: Khóa vật ở giữa khung"
+                }
             } else if finalProgress < 0.5 {
-                stage = parent.exportSubject == .nearbyObject ? "Bước 2/4: Quét các mép và gờ" : "Bước 2/4: Bổ sung góc khuất"
+                switch parent.exportSubject {
+                case .room: stage = "Bước 2/4: Bổ sung góc khuất"
+                case .nearbyObject: stage = "Bước 2/4: Quét các mép và gờ"
+                case .ultraDetailObject: stage = "Bước 2/4: Quét mép và cạnh thật chậm"
+                }
             } else if finalProgress < 0.8 {
-                stage = parent.exportSubject == .nearbyObject ? "Bước 3/4: Giữ khoảng cách gần, quét chậm" : "Bước 3/4: Tăng chi tiết bề mặt"
+                switch parent.exportSubject {
+                case .room: stage = "Bước 3/4: Tăng chi tiết bề mặt"
+                case .nearbyObject: stage = "Bước 3/4: Giữ khoảng cách gần, quét chậm"
+                case .ultraDetailObject: stage = "Bước 3/4: Tích lũy texture sắc nét"
+                }
             } else {
-                stage = parent.exportSubject == .nearbyObject ? "Bước 4/4: Khóa chi tiết vật gần" : "Bước 4/4: Gần hoàn tất - quét chậm thêm"
+                switch parent.exportSubject {
+                case .room: stage = "Bước 4/4: Gần hoàn tất - quét chậm thêm"
+                case .nearbyObject: stage = "Bước 4/4: Khóa chi tiết vật gần"
+                case .ultraDetailObject: stage = "Bước 4/4: Hoàn thiện cận cảnh"
+                }
             }
 
             let ac = cachedAnchorCount
@@ -237,6 +247,30 @@ struct LiDARMeshScanView: UIViewRepresentable {
     }
 }
 
+private enum CaptureWorkflowMode: String, CaseIterable, Identifiable {
+    case roomBase
+    case detailPatch
+    case fusionExport
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .roomBase: return "Room Base"
+        case .detailPatch: return "Detail Patch"
+        case .fusionExport: return "Fusion Export"
+        }
+    }
+
+    var exportSubject: ARMeshExporter.ExportSubject {
+        switch self {
+        case .roomBase: return .room
+        case .detailPatch: return .ultraDetailObject
+        case .fusionExport: return .room
+        }
+    }
+}
+
 struct LiDARMeshScanContainer: View {
 
     var isTabActive: Bool
@@ -250,8 +284,10 @@ struct LiDARMeshScanContainer: View {
     @State private var exportURLs: [URL] = []
     @State private var isExporting = false
     @State private var arViewRef: ARView?
+    @State private var workflowMode: CaptureWorkflowMode = .roomBase
+    @State private var exportSubject: ARMeshExporter.ExportSubject = .room
     @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .precise
-    @State private var exportSubject: ARMeshExporter.ExportSubject = .ultraDetailObject
+    @State private var detailPatches: [ARMeshExporter.DetailPatch] = []
     @State private var scanProgress: Double = 0
     @State private var scanStageText: String = "Đang khởi động mesh..."
     @State private var isMovingTooFast: Bool = false
@@ -305,58 +341,27 @@ struct LiDARMeshScanContainer: View {
                 .background(.ultraThinMaterial)
                 .cornerRadius(12)
 
+                Picker("Quy trình", selection: $workflowMode) {
+                    ForEach(CaptureWorkflowMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: workflowMode) { newValue in
+                    exportSubject = newValue.exportSubject
+                }
+
+                Text(workflowDescription)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+
                 if isMovingTooFast {
-                    Text(exportSubject == .ultraDetailObject
-                         ? "Siêu chi tiết yêu cầu gần như đứng yên giữa các khung. Hãy quét cực chậm."
-                         : (exportSubject == .nearbyObject
-                            ? "Quét vật gần cần di chuyển rất chậm để giữ đúng mép, chiều sâu và màu."
-                            : "Di chuyển hơi nhanh - quét chậm để giữ màu và hình khối tốt hơn."))
+                    Text(speedWarning)
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .padding(6)
                         .background(.ultraThinMaterial)
                         .cornerRadius(8)
-                }
-
-                Picker("Chế độ", selection: $exportSubject) {
-                    ForEach(ARMeshExporter.ExportSubject.allCases) { subject in
-                        Text(subject.displayName).tag(subject)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                Text(exportSubject == .ultraDetailObject
-                     ? "Siêu chi tiết: dồn mạnh vào vật thể trung tâm, nhiều texture hơn, ưu tiên độ sắc nét."
-                     : (exportSubject == .nearbyObject
-                        ? "Vật gần: lọc nền xa, siết chiều sâu, ưu tiên laptop, màn hình, bàn."
-                        : "Không gian: giữ phạm vi rộng hơn, phù hợp quét phòng và bố cục tổng thể."))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                if exportSubject != .room {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(exportSubject == .ultraDetailObject ? "Hướng dẫn siêu chi tiết" : "Hướng dẫn quét vật gần")
-                            .font(.caption.bold())
-                        Text(exportSubject == .ultraDetailObject
-                             ? "1. Giữ vật ở giữa khung hình, cách khoảng 20-45cm."
-                             : "1. Giữ vật ở giữa khung hình, cách khoảng 25-70cm.")
-                            .font(.caption2)
-                        Text(exportSubject == .ultraDetailObject
-                             ? "2. Lia cực chậm, ưu tiên mép, cạnh, bàn phím, viền màn hình."
-                             : "2. Lia rất chậm, ưu tiên quét mép, góc và mặt trước.")
-                            .font(.caption2)
-                        Text("3. Tránh để vật sát viền ảnh hoặc bị phản chiếu quá mạnh.")
-                            .font(.caption2)
-                        Text("4. Nếu log còn out of bounds cao, hãy giữ vật lớn hơn trong khung.")
-                            .font(.caption2)
-                        Text("5. Nếu depth mismatch cao, hãy giảm lia nhanh và bớt góc xiên.")
-                            .font(.caption2)
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(10)
                 }
 
                 Picker("Độ mịn", selection: $smoothingPreset) {
@@ -366,6 +371,51 @@ struct LiDARMeshScanContainer: View {
                 }
                 .pickerStyle(.segmented)
 
+                if workflowMode == .detailPatch {
+                    HStack(spacing: 8) {
+                        Button(action: markDetailPatch) {
+                            Label("Đánh dấu vùng chi tiết", systemImage: "plus.viewfinder")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Xóa tất cả") {
+                            detailPatches.removeAll()
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(detailPatches.isEmpty)
+                    }
+                }
+
+                if !detailPatches.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Vùng chi tiết đã đánh dấu: \(detailPatches.count)")
+                            .font(.caption.bold())
+                        ForEach(Array(detailPatches.enumerated()), id: \.element.id) { idx, patch in
+                            HStack {
+                                Text("\(idx + 1). \(patch.label)")
+                                    .font(.caption2)
+                                Spacer()
+                                Text("r=\(String(format: "%.2f", patch.radius))m")
+                                    .font(.caption2.monospacedDigit())
+                                Button {
+                                    detailPatches.removeAll { $0.id == patch.id }
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8)
+                    .background(.ultraThinMaterial)
+                    .cornerRadius(10)
+                }
+
+                detailGuidanceCard
+
                 Button { exportAll() } label: {
                     if isExporting {
                         HStack(spacing: 8) {
@@ -374,7 +424,7 @@ struct LiDARMeshScanContainer: View {
                         }
                         .frame(maxWidth: .infinity)
                     } else {
-                        Label("Xuất GLB + OBJ + JPG", systemImage: "square.and.arrow.up.fill")
+                        Label("Fusion Export: GLB + OBJ + JPG", systemImage: "square.and.arrow.up.fill")
                             .frame(maxWidth: .infinity)
                     }
                 }
@@ -397,6 +447,86 @@ struct LiDARMeshScanContainer: View {
                 ShareSheet(items: exportURLs)
             }
         }
+        .onAppear {
+            exportSubject = workflowMode.exportSubject
+        }
+    }
+
+    private var workflowDescription: String {
+        switch workflowMode {
+        case .roomBase:
+            return "Room Base: quét toàn phòng để lấy hình khối, khoảng cách và bố cục nền."
+        case .detailPatch:
+            return "Detail Patch: chĩa giữa màn hình vào vùng quan trọng rồi bấm đánh dấu để tăng texture/chi tiết khi export."
+        case .fusionExport:
+            return "Fusion Export: giữ full phòng nhưng vá mạnh texture và màu cho các vùng đã đánh dấu."
+        }
+    }
+
+    private var speedWarning: String {
+        switch exportSubject {
+        case .room:
+            return "Di chuyển hơi nhanh - quét chậm để giữ màu và hình khối tốt hơn."
+        case .nearbyObject:
+            return "Quét vật gần cần di chuyển rất chậm để giữ đúng mép, chiều sâu và màu."
+        case .ultraDetailObject:
+            return "Cận cảnh siêu chi tiết yêu cầu gần như đứng yên giữa các khung. Hãy quét cực chậm."
+        }
+    }
+
+    @ViewBuilder
+    private var detailGuidanceCard: some View {
+        if workflowMode != .roomBase {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(workflowMode == .detailPatch ? "Hướng dẫn đánh dấu patch" : "Hướng dẫn fusion export")
+                    .font(.caption.bold())
+                Text("1. Giữ vùng cần tăng chi tiết ở giữa khung hình.")
+                    .font(.caption2)
+                Text("2. Với patch quan trọng, giữ khoảng cách khoảng 20-45cm và quét cực chậm.")
+                    .font(.caption2)
+                Text("3. Ưu tiên mép, bàn phím, màn hình, mặt bàn và vật thể chính.")
+                    .font(.caption2)
+                Text("4. Export cuối sẽ giữ full phòng nhưng vá texture mạnh hơn trong các patch đã đánh dấu.")
+                    .font(.caption2)
+            }
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(8)
+            .background(.ultraThinMaterial)
+            .cornerRadius(10)
+        }
+    }
+
+    private func markDetailPatch() {
+        guard let view = arViewRef else {
+            exportMessage = "ARView chưa sẵn sàng để đánh dấu patch."
+            return
+        }
+
+        let center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        let results = view.raycast(from: center, allowing: .estimatedPlane, alignment: .any)
+
+        let patchCenter: SIMD3<Float>
+        if let first = results.first {
+            patchCenter = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+        } else if let frame = view.session.currentFrame {
+            let t = frame.camera.transform
+            let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+            let forward = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
+            patchCenter = camPos + simd_normalize(forward) * 0.55
+        } else {
+            exportMessage = "Không xác định được vùng giữa khung hình để tạo patch."
+            return
+        }
+
+        let index = detailPatches.count + 1
+        let patch = ARMeshExporter.DetailPatch(
+            center: patchCenter,
+            radius: workflowMode == .detailPatch ? 0.65 : 0.75,
+            label: "Patch \(index)"
+        )
+        detailPatches.append(patch)
+        exportMessage = "Đã thêm \(patch.label). Hãy quét chậm quanh vùng này để tăng chi tiết."
     }
 
     private func exportAll() {
@@ -410,7 +540,8 @@ struct LiDARMeshScanContainer: View {
         let session = view.session
         let stamp = Int(Date().timeIntervalSince1970)
         let preset = smoothingPreset
-        let profile = ARMeshExporter.ExportProfile(subject: exportSubject)
+        let baseProfile = ARMeshExporter.ExportProfile(subject: .room)
+        let patches = detailPatches
 
         DispatchQueue.global(qos: .userInitiated).async {
             MeshLaplacianSmooth.applyPreset(preset)
@@ -419,7 +550,7 @@ struct LiDARMeshScanContainer: View {
             var errors: [String] = []
 
             do {
-                if let glbData = ARMeshExporter.buildFacetedGLB(from: session, profile: profile) {
+                if let glbData = ARMeshExporter.buildFacetedGLB(from: session, profile: baseProfile, detailPatches: patches) {
                     let glbURL = dir.appendingPathComponent("scan-\(stamp).glb")
                     try glbData.write(to: glbURL, options: .atomic)
                     urls.append(glbURL)
@@ -431,7 +562,8 @@ struct LiDARMeshScanContainer: View {
                 if let bundle = ARMeshExporter.buildTexturedOBJBundle(
                     from: session,
                     textureFilename: texName,
-                    profile: profile
+                    profile: baseProfile,
+                    detailPatches: patches
                 ) {
                     let objURL = dir.appendingPathComponent("scan-\(stamp).obj")
                     let mtlURL = dir.appendingPathComponent("scan-\(stamp).mtl")
@@ -458,7 +590,7 @@ struct LiDARMeshScanContainer: View {
                 } else {
                     self.exportURLs = urls
                     let note = errors.isEmpty ? "" : " (\(errors.joined(separator: ", ")))"
-                    self.exportMessage = "Đã tạo \(urls.count) file\(note) - ưu tiên mesh chính xác và texture tốt hơn."
+                    self.exportMessage = "Đã tạo \(urls.count) file\(note) - full phòng + vá chi tiết cho \(patches.count) patch."
                     self.showShare = true
                 }
             }

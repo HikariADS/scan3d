@@ -144,6 +144,20 @@ enum ARMeshExporter {
         }
     }
 
+    struct DetailPatch: Identifiable {
+        let id: UUID
+        let center: SIMD3<Float>
+        let radius: Float
+        let label: String
+
+        init(id: UUID = UUID(), center: SIMD3<Float>, radius: Float = 0.7, label: String = "Vùng chi tiết") {
+            self.id = id
+            self.center = center
+            self.radius = radius
+            self.label = label
+        }
+    }
+
     // MARK: - Multi-frame color history
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
@@ -205,11 +219,15 @@ enum ARMeshExporter {
     }
 
     /// Binary glTF 2.0: per-face color + flat normals — **Xcode Scene Editor shows COLOR_0**; good for “rõ vật thể”.
-    static func buildFacetedGLB(from session: ARSession, profile: ExportProfile = ExportProfile(subject: .room)) -> Data? {
+    static func buildFacetedGLB(
+        from session: ARSession,
+        profile: ExportProfile = ExportProfile(subject: .room),
+        detailPatches: [DetailPatch] = []
+    ) -> Data? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return nil }
-        return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame, profile: profile)
+        return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame, profile: profile, detailPatches: detailPatches)
     }
 
     // MARK: - Textured OBJ (Solution B)
@@ -226,7 +244,8 @@ enum ARMeshExporter {
     static func buildTexturedOBJBundle(
         from session: ARSession,
         textureFilename: String = "texture.jpg",
-        profile: ExportProfile = ExportProfile(subject: .room)
+        profile: ExportProfile = ExportProfile(subject: .room),
+        detailPatches: [DetailPatch] = []
     ) -> TexturedOBJBundle? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
@@ -236,7 +255,12 @@ enum ARMeshExporter {
         let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
         guard !preparedMeshes.isEmpty else { return nil }
 
-        let atlasFrames = bestTextureFrames(from: frames.isEmpty ? [frame] : frames, preparedMeshes: preparedMeshes, profile: profile)
+        let atlasFrames = bestTextureFrames(
+            from: frames.isEmpty ? [frame] : frames,
+            preparedMeshes: preparedMeshes,
+            profile: profile,
+            detailPatches: detailPatches
+        )
         guard let atlas = buildTextureAtlas(from: atlasFrames, quality: profile.textureJPEGQuality) else { return nil }
         let texW = atlas.size.width
         let texH = atlas.size.height
@@ -256,7 +280,8 @@ enum ARMeshExporter {
 
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-                if let bestProjection = bestTextureProjection(worldPosition: v, normal: n, frames: atlasFrames, profile: profile) {
+                let localProfile = profileForPosition(v, baseProfile: profile, detailPatches: detailPatches)
+                if let bestProjection = bestTextureProjection(worldPosition: v, normal: n, frames: atlasFrames, profile: localProfile) {
                     let tile = atlas.tiles[bestProjection.frameIndex]
                     let atlasX = tile.origin.x + bestProjection.point.x
                     let atlasY = tile.origin.y + bestProjection.point.y
@@ -435,7 +460,12 @@ enum ARMeshExporter {
 
     // MARK: - glTF 2.0 GLB
 
-    private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> Data? {
+    private static func buildFacetedGLB(
+        meshAnchors: [ARMeshAnchor],
+        frame: ARFrame,
+        profile: ExportProfile,
+        detailPatches: [DetailPatch]
+    ) -> Data? {
         let diag = ColorDiag()
         logExportHeader(tag: "GLB", frame: frame)
         var positions: [Float] = []
@@ -448,7 +478,8 @@ enum ARMeshExporter {
             for i in 0..<mesh.positions.count {
                 let p = mesh.positions[i]
                 let n = mesh.normals[i]
-                let c = sampleCameraColor(worldPosition: p, worldNormal: n, frame: frame, diag: diag, profile: profile)
+                let localProfile = profileForPosition(p, baseProfile: profile, detailPatches: detailPatches)
+                let c = sampleCameraColor(worldPosition: p, worldNormal: n, frame: frame, diag: diag, profile: localProfile)
                 diag.countVertex()
                 positions.append(contentsOf: [p.x, p.y, p.z])
                 normals.append(contentsOf: [n.x, n.y, n.z])
@@ -707,13 +738,34 @@ enum ARMeshExporter {
         return SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
     }
 
-    private static func bestTextureFrames(from frames: [ARFrame], preparedMeshes: [PreparedMesh], profile: ExportProfile) -> [ARFrame] {
+    private static func profileForPosition(
+        _ position: SIMD3<Float>,
+        baseProfile: ExportProfile,
+        detailPatches: [DetailPatch]
+    ) -> ExportProfile {
+        for patch in detailPatches {
+            if simd_distance(position, patch.center) <= patch.radius {
+                return ExportProfile(subject: .ultraDetailObject)
+            }
+        }
+        return baseProfile
+    }
+
+    private static func bestTextureFrames(
+        from frames: [ARFrame],
+        preparedMeshes: [PreparedMesh],
+        profile: ExportProfile,
+        detailPatches: [DetailPatch]
+    ) -> [ARFrame] {
         guard !frames.isEmpty else { return [] }
         let allPoints = preparedMeshes.flatMap { $0.positions }
         let samplePoints = allPoints.enumerated().compactMap { idx, p in
             idx % 18 == 0 ? p : nil
         }
         guard !samplePoints.isEmpty else { return [frames.last!]} // safe: frames not empty
+
+        let effectiveAtlasCount = max(profile.atlasFrameCount, detailPatches.isEmpty ? 0 : ExportProfile(subject: .ultraDetailObject).atlasFrameCount)
+        let patchCenters = detailPatches.map(\.center)
 
         let scored = frames.enumerated().map { frameOrder, frame -> (ARFrame, Float) in
             let camPos = cameraPosition(frame: frame)
@@ -724,14 +776,20 @@ enum ARMeshExporter {
             var hits = 0
 
             for p in samplePoints {
+                let localProfile = profileForPosition(p, baseProfile: profile, detailPatches: detailPatches)
                 let normal = simd_normalize(camPos - p)
-                guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: profile) else { continue }
+                guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: localProfile) else { continue }
                 let depth = simd_distance(camPos, p)
-                guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else { continue }
+                guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: localProfile) else { continue }
                 let border = imageBorderWeight(point: pt, width: w, height: h)
-                let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
+                let center = centerWeight(point: pt, width: w, height: h, bias: localProfile.centerBias)
                 score += border * center * (1.0 / (1.0 + 0.35 * depth * depth))
                 hits += 1
+            }
+
+            for centerPos in patchCenters {
+                let d = simd_distance(camPos, centerPos)
+                score += 0.4 / (1.0 + d * d)
             }
 
             score += Float(hits) * 0.15
@@ -741,7 +799,7 @@ enum ARMeshExporter {
 
         let unique = scored
             .sorted { $0.1 > $1.1 }
-            .prefix(max(1, profile.atlasFrameCount))
+            .prefix(max(1, effectiveAtlasCount))
             .map { $0.0 }
         return Array(unique)
     }
