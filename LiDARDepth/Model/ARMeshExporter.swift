@@ -53,6 +53,53 @@ private final class ColorDiag: @unchecked Sendable {
 }
 
 enum ARMeshExporter {
+    enum ExportSubject: String, CaseIterable, Identifiable {
+        case room
+        case nearbyObject
+
+        var id: String { rawValue }
+
+        var displayName: String {
+            switch self {
+            case .room: return "Không gian"
+            case .nearbyObject: return "Vật gần"
+            }
+        }
+    }
+
+    struct ExportProfile {
+        let subject: ExportSubject
+
+        var objectMinDistance: Float { 0.08 }
+        var objectMaxDistance: Float {
+            switch subject {
+            case .room: return 6.0
+            case .nearbyObject: return 1.35
+            }
+        }
+        var depthToleranceBase: Float {
+            switch subject {
+            case .room: return 0.06
+            case .nearbyObject: return 0.035
+            }
+        }
+        var depthToleranceScale: Float {
+            switch subject {
+            case .room: return 0.08
+            case .nearbyObject: return 0.05
+            }
+        }
+        var textureJPEGQuality: CGFloat {
+            switch subject {
+            case .room: return 0.92
+            case .nearbyObject: return 0.98
+            }
+        }
+        var prefersAggressiveOcclusion: Bool {
+            subject == .nearbyObject
+        }
+    }
+
     // MARK: - Multi-frame color history
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
@@ -115,11 +162,11 @@ enum ARMeshExporter {
     }
 
     /// Binary glTF 2.0: per-face color + flat normals — **Xcode Scene Editor shows COLOR_0**; good for “rõ vật thể”.
-    static func buildFacetedGLB(from session: ARSession) -> Data? {
+    static func buildFacetedGLB(from session: ARSession, profile: ExportProfile = ExportProfile(subject: .room)) -> Data? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return nil }
-        return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame)
+        return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame, profile: profile)
     }
 
     // MARK: - Textured OBJ (Solution B)
@@ -135,71 +182,54 @@ enum ARMeshExporter {
 
     static func buildTexturedOBJBundle(
         from session: ARSession,
-        textureFilename: String = "texture.jpg"
+        textureFilename: String = "texture.jpg",
+        profile: ExportProfile = ExportProfile(subject: .room)
     ) -> TexturedOBJBundle? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return nil }
 
-        // Lấy tất cả fusion frames để sample UV từ frame phủ tốt nhất cho từng vertex
         let frames = fusionFrames(including: frame)
-        // Dùng frame cuối cùng (mới nhất) làm texture chính
-        let texFrame = frames.last ?? frame
-        guard let textureData = extractJPEG(from: texFrame) else { return nil }
+        let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
+        guard !preparedMeshes.isEmpty else { return nil }
+
+        let texFrame = bestTextureFrame(from: frames, preparedMeshes: preparedMeshes, profile: profile) ?? frames.last ?? frame
+        guard let textureData = extractJPEG(from: texFrame, quality: profile.textureJPEGQuality) else { return nil }
         let texW = CGFloat(CVPixelBufferGetWidth(texFrame.capturedImage))
         let texH = CGFloat(CVPixelBufferGetHeight(texFrame.capturedImage))
 
-        var vSection = ""     // v x y z
-        var vtSection = ""    // vt u v
-        var vnSection = ""    // vn x y z
+        var vSection = ""
+        var vtSection = ""
+        var vnSection = ""
         var fSection = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
         var vertexBase = 1
 
-        for anchor in meshAnchors {
-            let geometry = anchor.geometry
-            var verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
-            var indices = triangleIndices(geometry: geometry)
-            MeshLaplacianSmooth.smooth(positions: &verts, triangleIndices: indices)
-            MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &verts, triangleIndices: &indices)
-            let normals = MeshLaplacianSmooth.vertexNormals(positions: verts, triangleIndices: indices)
-
-            for i in 0..<verts.count {
-                let v = verts[i]
-                let n = normals[i]
+        for mesh in preparedMeshes {
+            for i in 0..<mesh.positions.count {
+                let v = mesh.positions[i]
+                let n = mesh.normals[i]
                 vSection += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
                 vnSection += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
 
-                // Thử chiếu lên texFrame trước. Nếu texFrame không phủ được vertex này,
-                // thử các fusion frames khác để tìm frame chiếu tốt nhất (ndotl cao nhất).
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-
-                if let pt = projectWorldToImagePixel(worldPosition: v, frame: texFrame) {
-                    // Vertex nằm trong texFrame → UV trực tiếp
+                if let pt = textureCoordinatePoint(worldPosition: v, normal: n, frame: texFrame, profile: profile) {
                     u = Float(max(0, min(pt.x / texW, 1)))
                     vCoord = Float(max(0, min(1 - pt.y / texH, 1)))
-                } else {
-                    // Thử fusion frames khác — bake màu vào UV (0.5, y) dựa trên Y normalized
-                    // Fallback: dùng màu từ multi-frame vertex coloring nếu không có UV
-                    let color = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
-                    // Encode màu vào dải 1px vertical trong texture bằng cách không dùng UV này.
-                    // Thực tế: fallback về UV = (0.5, 0.5) để không bị stretch xấu.
-                    _ = color
                 }
                 vtSection += String(format: "vt %.6f %.6f\n", u, vCoord)
             }
 
             let base = vertexBase
-            for i in stride(from: 0, to: indices.count, by: 3) {
-                let i0 = Int(indices[i]) + base
-                let i1 = Int(indices[i + 1]) + base
-                let i2 = Int(indices[i + 2]) + base
+            for i in stride(from: 0, to: mesh.indices.count, by: 3) {
+                let i0 = Int(mesh.indices[i]) + base
+                let i1 = Int(mesh.indices[i + 1]) + base
+                let i2 = Int(mesh.indices[i + 2]) + base
                 fSection += "f \(i0)/\(i0)/\(i0) \(i1)/\(i1)/\(i1) \(i2)/\(i2)/\(i2)\n"
             }
-            vertexBase += verts.count
+            vertexBase += mesh.positions.count
         }
 
-        // OBJ canonical order: v → vt → vn → f
         let obj = vSection + vtSection + vnSection + fSection
         let mtl = """
         newmtl camera_tex
@@ -213,12 +243,12 @@ enum ARMeshExporter {
         return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: textureData)
     }
 
-    private static func extractJPEG(from frame: ARFrame) -> Data? {
+    private static func extractJPEG(from frame: ARFrame, quality: CGFloat) -> Data? {
         let pb = frame.capturedImage
         let ci = CIImage(cvPixelBuffer: pb)
         let ctx = CIContext(options: [.useSoftwareRenderer: false])
         guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
-        return UIImage(cgImage: cg).jpegData(compressionQuality: 0.88)
+        return UIImage(cgImage: cg).jpegData(compressionQuality: quality)
     }
 
     static func meshStatistics(from session: ARSession) -> (anchors: Int, triangles: Int) {
@@ -357,56 +387,47 @@ enum ARMeshExporter {
         return ply
     }
 
-    // MARK: - glTF 2.0 GLB (faceted, per-triangle color)
+    // MARK: - glTF 2.0 GLB
 
-    private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> Data? {
+    private static func buildFacetedGLB(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> Data? {
         let diag = ColorDiag()
         logExportHeader(tag: "GLB", frame: frame)
         var positions: [Float] = []
         var normals: [Float] = []
         var colors: [Float] = []
+        var indicesOut: [UInt32] = []
+        var vertexOffset: UInt32 = 0
 
-        for anchor in meshAnchors {
-            let geometry = anchor.geometry
-            var verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
-            var indices = triangleIndices(geometry: geometry)
-            MeshLaplacianSmooth.smooth(positions: &verts, triangleIndices: indices)
-            MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &verts, triangleIndices: &indices)
-            for t in stride(from: 0, to: indices.count, by: 3) {
-                let i0 = Int(indices[t])
-                let i1 = Int(indices[t + 1])
-                let i2 = Int(indices[t + 2])
-                let p0 = verts[i0]
-                let p1 = verts[i1]
-                let p2 = verts[i2]
-                let e1 = p1 - p0
-                let e2 = p2 - p0
-                var fn = simd_cross(e1, e2)
-                let ln = simd_length(fn)
-                guard ln >= 1e-8 else { continue }
-                fn = fn / ln
-                let center = (p0 + p1 + p2) * (1.0 / 3.0)
-                let c = sampleCameraColor(worldPosition: center, worldNormal: fn, frame: frame, diag: diag)
+        for mesh in prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile) {
+            for i in 0..<mesh.positions.count {
+                let p = mesh.positions[i]
+                let n = mesh.normals[i]
+                let c = sampleCameraColor(worldPosition: p, worldNormal: n, frame: frame, diag: diag, profile: profile)
                 diag.countVertex()
-                for p in [p0, p1, p2] {
-                    positions.append(contentsOf: [p.x, p.y, p.z])
-                    normals.append(contentsOf: [fn.x, fn.y, fn.z])
-                    colors.append(contentsOf: [c.x, c.y, c.z])
-                }
+                positions.append(contentsOf: [p.x, p.y, p.z])
+                normals.append(contentsOf: [n.x, n.y, n.z])
+                colors.append(contentsOf: [c.x, c.y, c.z])
             }
+            for idx in mesh.indices {
+                indicesOut.append(vertexOffset + idx)
+            }
+            vertexOffset += UInt32(mesh.positions.count)
         }
+
         let vertexCount = positions.count / 3
-        guard vertexCount > 0 else { return nil }
+        guard vertexCount > 0, !indicesOut.isEmpty else { return nil }
         diag.printSummary(tag: "GLB")
-        return encodeGLB(positions: positions, normals: normals, colors: colors, vertexCount: vertexCount)
+        return encodeIndexedGLB(positions: positions, normals: normals, colors: colors, indices: indicesOut, vertexCount: vertexCount)
     }
 
     /// glTF 2.0: `ARRAY_BUFFER` / `ELEMENT_ARRAY_BUFFER` (OpenGL ES constants).
     private static let gltfArrayBuffer: Int = 34962
+    private static let gltfElementArrayBuffer: Int = 34963
 
-    private static func encodeGLB(positions: [Float], normals: [Float], colors: [Float], vertexCount: Int) -> Data {
+    private static func encodeIndexedGLB(positions: [Float], normals: [Float], colors: [Float], indices: [UInt32], vertexCount: Int) -> Data {
         let posData = positions.withUnsafeBufferPointer { Data(buffer: $0) }
         let normData = normals.withUnsafeBufferPointer { Data(buffer: $0) }
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
         var colorBytes: [UInt8] = []
         colorBytes.reserveCapacity(vertexCount * 4)
         for i in 0..<vertexCount {
@@ -424,6 +445,7 @@ enum ARMeshExporter {
         binChunk.append(posData)
         binChunk.append(normData)
         binChunk.append(colorData)
+        binChunk.append(indexData)
         while binChunk.count % 4 != 0 {
             binChunk.append(0)
         }
@@ -441,11 +463,10 @@ enum ARMeshExporter {
 
         let p0 = posData.count
         let p1 = p0 + normData.count
-        let tgt = gltfArrayBuffer
+        let p2 = p1 + colorData.count
 
-        // Vertex color as normalized RGBA8 improves compatibility across viewers.
         let json: String = """
-        {"asset":{"version":"2.0","generator":"LiDARDepth"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"material":0}]}],"materials":[{"doubleSided":true,"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":1}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(tgt)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(tgt)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count),"target":\(tgt)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5121,"normalized":true,"count":\(vertexCount),"type":"VEC4"}]}
+        {"asset":{"version":"2.0","generator":"LiDARDepth"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"indices":3,"material":0}]}],"materials":[{"doubleSided":true,"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":1}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p2),"byteLength":\(indexData.count),"target":\(gltfElementArrayBuffer)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5121,"normalized":true,"count":\(vertexCount),"type":"VEC4"},{"bufferView":3,"componentType":5125,"count":\(indices.count),"type":"SCALAR"}]}
         """
 
         var jsonData = Data(json.utf8)
@@ -522,6 +543,102 @@ enum ARMeshExporter {
         )
     }
 
+    private struct PreparedMesh {
+        let positions: [SIMD3<Float>]
+        let normals: [SIMD3<Float>]
+        let indices: [UInt32]
+    }
+
+    private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
+        var result: [PreparedMesh] = []
+        let camPos = cameraPosition(frame: frame)
+
+        for anchor in meshAnchors {
+            let geometry = anchor.geometry
+            var verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
+            var indices = triangleIndices(geometry: geometry)
+            MeshLaplacianSmooth.smooth(positions: &verts, triangleIndices: indices)
+            MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &verts, triangleIndices: &indices)
+            let normals = MeshLaplacianSmooth.vertexNormals(positions: verts, triangleIndices: indices)
+
+            let filtered = filterMesh(positions: verts, normals: normals, indices: indices, cameraPosition: camPos, profile: profile)
+            if !filtered.indices.isEmpty {
+                result.append(filtered)
+            }
+        }
+        return result
+    }
+
+    private static func filterMesh(
+        positions: [SIMD3<Float>],
+        normals: [SIMD3<Float>],
+        indices: [UInt32],
+        cameraPosition: SIMD3<Float>,
+        profile: ExportProfile
+    ) -> PreparedMesh {
+        guard profile.subject == .nearbyObject else {
+            return PreparedMesh(positions: positions, normals: normals, indices: indices)
+        }
+
+        var keptVertices = Set<Int>()
+        var keptTriangles: [(Int, Int, Int)] = []
+        keptTriangles.reserveCapacity(indices.count / 3)
+
+        for i in stride(from: 0, to: indices.count, by: 3) {
+            let i0 = Int(indices[i])
+            let i1 = Int(indices[i + 1])
+            let i2 = Int(indices[i + 2])
+            let center = (positions[i0] + positions[i1] + positions[i2]) / 3
+            let dist = simd_distance(center, cameraPosition)
+            if dist < profile.objectMinDistance || dist > profile.objectMaxDistance {
+                continue
+            }
+
+            let viewDir = simd_normalize(cameraPosition - center)
+            let avgNormal = simd_normalize(normals[i0] + normals[i1] + normals[i2])
+            if simd_length_squared(avgNormal) > 1e-6 {
+                let facing = abs(simd_dot(avgNormal, viewDir))
+                if facing < 0.08 {
+                    continue
+                }
+            }
+
+            keptVertices.insert(i0)
+            keptVertices.insert(i1)
+            keptVertices.insert(i2)
+            keptTriangles.append((i0, i1, i2))
+        }
+
+        guard !keptTriangles.isEmpty else {
+            return PreparedMesh(positions: [], normals: [], indices: [])
+        }
+
+        var remap: [Int: UInt32] = [:]
+        var newPositions: [SIMD3<Float>] = []
+        var newNormals: [SIMD3<Float>] = []
+        newPositions.reserveCapacity(keptVertices.count)
+        newNormals.reserveCapacity(keptVertices.count)
+        for oldIndex in keptVertices.sorted() {
+            remap[oldIndex] = UInt32(newPositions.count)
+            newPositions.append(positions[oldIndex])
+            newNormals.append(normals[oldIndex])
+        }
+
+        var newIndices: [UInt32] = []
+        newIndices.reserveCapacity(keptTriangles.count * 3)
+        for tri in keptTriangles {
+            guard let a = remap[tri.0], let b = remap[tri.1], let c = remap[tri.2] else { continue }
+            newIndices.append(contentsOf: [a, b, c])
+        }
+
+        return PreparedMesh(positions: newPositions, normals: newNormals, indices: newIndices)
+    }
+
+    private static func cameraPosition(frame: ARFrame) -> SIMD3<Float> {
+        let t = frame.camera.transform
+        return SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+    }
+
     private static func triangleIndices(geometry: ARMeshGeometry) -> [UInt32] {
         let faces = geometry.faces
         let triangleCount = faces.count
@@ -561,6 +678,16 @@ enum ARMeshExporter {
     /// - Border confidence
     /// - 5-tap pixel sampling to reduce sensor noise
     private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, diag: ColorDiag? = nil) -> SIMD3<Float> {
+        sampleCameraColor(worldPosition: worldPosition, worldNormal: worldNormal, frame: frame, diag: diag, profile: ExportProfile(subject: .room))
+    }
+
+    private static func sampleCameraColor(
+        worldPosition: SIMD3<Float>,
+        worldNormal: SIMD3<Float>?,
+        frame: ARFrame,
+        diag: ColorDiag? = nil,
+        profile: ExportProfile
+    ) -> SIMD3<Float> {
         let frames = fusionFrames(including: frame)
         if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.55) }
         var colorAccum = SIMD3<Float>(0, 0, 0)
@@ -573,7 +700,8 @@ enum ARMeshExporter {
                 totalFrames: frames.count,
                 worldPosition: worldPosition,
                 worldNormal: worldNormal,
-                diag: diag
+                diag: diag,
+                profile: profile
             ) else { continue }
             colorAccum += color * weight
             weightAccum += weight
@@ -593,7 +721,8 @@ enum ARMeshExporter {
         totalFrames: Int,
         worldPosition: SIMD3<Float>,
         worldNormal: SIMD3<Float>?,
-        diag: ColorDiag? = nil
+        diag: ColorDiag? = nil,
+        profile: ExportProfile
     ) -> (SIMD3<Float>, Float)? {
         let cam = frame.camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
         if cam.z > -0.01 {
@@ -649,7 +778,7 @@ enum ARMeshExporter {
         let w = CVPixelBufferGetWidth(pb)
         let h = CVPixelBufferGetHeight(pb)
         let geometricDepth = dist
-        if !passesDepthConsistency(frame: frame, projected: projected, imageWidth: w, imageHeight: h, geometricDepth: geometricDepth) {
+        if !passesDepthConsistency(frame: frame, projected: projected, imageWidth: w, imageHeight: h, geometricDepth: geometricDepth, profile: profile) {
             diag?.countOutOfBounds()
             return nil
         }
@@ -662,7 +791,8 @@ enum ARMeshExporter {
             diag?.countBackface()
         }
         let angleWeight = max(0.35, min(1.0, 0.35 + 0.65 * facing))
-        let distanceWeight = 1.0 / (1.0 + 0.65 * dist * dist)
+        let distanceScale: Float = profile.subject == .nearbyObject ? 1.15 : 0.65
+        let distanceWeight = 1.0 / (1.0 + distanceScale * dist * dist)
         let borderWeight = imageBorderWeight(point: projected, width: w, height: h)
         let recency = Float(frameOrder + 1) / Float(max(totalFrames, 1))
         let temporalWeight = 0.65 + 0.35 * recency
@@ -681,7 +811,8 @@ enum ARMeshExporter {
         projected: CGPoint,
         imageWidth: Int,
         imageHeight: Int,
-        geometricDepth: Float
+        geometricDepth: Float,
+        profile: ExportProfile
     ) -> Bool {
         let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth
         guard let depthMap = sceneDepth?.depthMap else { return true }
@@ -696,7 +827,7 @@ enum ARMeshExporter {
         }
 
         // Cho phép sai số tăng nhẹ theo khoảng cách để không loại oan điểm xa.
-        let tolerance = max(0.06, geometricDepth * 0.08)
+        let tolerance = max(profile.depthToleranceBase, geometricDepth * profile.depthToleranceScale)
         return abs(sampledDepth - geometricDepth) <= tolerance
     }
 
@@ -731,6 +862,65 @@ enum ARMeshExporter {
             return sampleBGRABilinear(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
         }
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
+    }
+
+    private static func bestTextureFrame(from frames: [ARFrame], preparedMeshes: [PreparedMesh], profile: ExportProfile) -> ARFrame? {
+        guard !frames.isEmpty else { return nil }
+        let allPoints = preparedMeshes.flatMap { $0.positions }
+        let samplePoints = allPoints.enumerated().compactMap { idx, p in
+            idx % 24 == 0 ? p : nil
+        }
+        guard !samplePoints.isEmpty else { return frames.last }
+
+        var bestFrame: ARFrame?
+        var bestScore: Float = -.greatestFiniteMagnitude
+
+        for (frameOrder, frame) in frames.enumerated() {
+            let camPos = cameraPosition(frame: frame)
+            let img = frame.capturedImage
+            let w = CVPixelBufferGetWidth(img)
+            let h = CVPixelBufferGetHeight(img)
+            var score: Float = 0
+            var hits = 0
+
+            for p in samplePoints {
+                let normal = simd_normalize(camPos - p)
+                guard let pt = textureCoordinatePoint(worldPosition: p, normal: normal, frame: frame, profile: profile) else { continue }
+                let depth = simd_distance(camPos, p)
+                guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else { continue }
+                let border = imageBorderWeight(point: pt, width: w, height: h)
+                score += border * (1.0 / (1.0 + depth * depth))
+                hits += 1
+            }
+
+            score += Float(hits) * 0.1
+            score += Float(frameOrder) * 0.02
+            if score > bestScore {
+                bestScore = score
+                bestFrame = frame
+            }
+        }
+        return bestFrame
+    }
+
+    private static func textureCoordinatePoint(
+        worldPosition: SIMD3<Float>,
+        normal: SIMD3<Float>,
+        frame: ARFrame,
+        profile: ExportProfile
+    ) -> CGPoint? {
+        guard let pt = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame) else { return nil }
+        let img = frame.capturedImage
+        let w = CVPixelBufferGetWidth(img)
+        let h = CVPixelBufferGetHeight(img)
+        let camPos = cameraPosition(frame: frame)
+        let depth = simd_distance(camPos, worldPosition)
+        guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else {
+            return nil
+        }
+        let ndotl = abs(simd_dot(simd_normalize(normal), simd_normalize(camPos - worldPosition)))
+        guard ndotl >= (profile.prefersAggressiveOcclusion ? 0.15 : 0.05) else { return nil }
+        return pt
     }
 
     private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
