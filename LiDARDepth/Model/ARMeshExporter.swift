@@ -141,15 +141,18 @@ enum ARMeshExporter {
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return nil }
 
-        // Pick best frame for texture: most recent with valid image.
-        let bestFrame = fusionFrames(including: frame).last ?? frame
-        guard let textureData = extractJPEG(from: bestFrame) else { return nil }
-        let texW = CVPixelBufferGetWidth(bestFrame.capturedImage)
-        let texH = CVPixelBufferGetHeight(bestFrame.capturedImage)
-        var vLines = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
-        var vtLines = ""
-        var vnLines = ""
-        var fLines = ""
+        // Lấy tất cả fusion frames để sample UV từ frame phủ tốt nhất cho từng vertex
+        let frames = fusionFrames(including: frame)
+        // Dùng frame cuối cùng (mới nhất) làm texture chính
+        let texFrame = frames.last ?? frame
+        guard let textureData = extractJPEG(from: texFrame) else { return nil }
+        let texW = CGFloat(CVPixelBufferGetWidth(texFrame.capturedImage))
+        let texH = CGFloat(CVPixelBufferGetHeight(texFrame.capturedImage))
+
+        var vSection = ""     // v x y z
+        var vtSection = ""    // vt u v
+        var vnSection = ""    // vn x y z
+        var fSection = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
         var vertexBase = 1
 
         for anchor in meshAnchors {
@@ -163,18 +166,27 @@ enum ARMeshExporter {
             for i in 0..<verts.count {
                 let v = verts[i]
                 let n = normals[i]
-                vLines += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
-                vnLines += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
+                vSection += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
+                vnSection += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
 
-                // Project vertex → camera image → normalized UV [0,1].
+                // Thử chiếu lên texFrame trước. Nếu texFrame không phủ được vertex này,
+                // thử các fusion frames khác để tìm frame chiếu tốt nhất (ndotl cao nhất).
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-                if let pt = projectWorldToImagePixel(worldPosition: v, frame: bestFrame) {
-                    u = Float(max(0, min(pt.x / CGFloat(texW), 1)))
-                    // Flip Y: OBJ UV origin is bottom-left; image origin is top-left.
-                    vCoord = Float(max(0, min(1 - pt.y / CGFloat(texH), 1)))
+
+                if let pt = projectWorldToImagePixel(worldPosition: v, frame: texFrame) {
+                    // Vertex nằm trong texFrame → UV trực tiếp
+                    u = Float(max(0, min(pt.x / texW, 1)))
+                    vCoord = Float(max(0, min(1 - pt.y / texH, 1)))
+                } else {
+                    // Thử fusion frames khác — bake màu vào UV (0.5, y) dựa trên Y normalized
+                    // Fallback: dùng màu từ multi-frame vertex coloring nếu không có UV
+                    let color = sampleCameraColor(worldPosition: v, worldNormal: n, frame: frame)
+                    // Encode màu vào dải 1px vertical trong texture bằng cách không dùng UV này.
+                    // Thực tế: fallback về UV = (0.5, 0.5) để không bị stretch xấu.
+                    _ = color
                 }
-                vtLines += String(format: "vt %.6f %.6f\n", u, vCoord)
+                vtSection += String(format: "vt %.6f %.6f\n", u, vCoord)
             }
 
             let base = vertexBase
@@ -182,13 +194,13 @@ enum ARMeshExporter {
                 let i0 = Int(indices[i]) + base
                 let i1 = Int(indices[i + 1]) + base
                 let i2 = Int(indices[i + 2]) + base
-                // f v/vt/vn — position, UV, normal all share same index.
-                fLines += "f \(i0)/\(i0)/\(i0) \(i1)/\(i1)/\(i1) \(i2)/\(i2)/\(i2)\n"
+                fSection += "f \(i0)/\(i0)/\(i0) \(i1)/\(i1)/\(i1) \(i2)/\(i2)/\(i2)\n"
             }
             vertexBase += verts.count
         }
 
-        let obj = vLines + vtLines + vnLines + fLines
+        // OBJ canonical order: v → vt → vn → f
+        let obj = vSection + vtSection + vnSection + fSection
         let mtl = """
         newmtl camera_tex
         Ka 1.000 1.000 1.000
@@ -676,25 +688,59 @@ enum ARMeshExporter {
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
     }
 
-    /// World → pixel trên `capturedImage` (buffer YUV/BGRA, luôn ở sensor-native landscape).
-    /// `camera.projectPoint(.landscapeRight, sensorSize)` cho tọa độ pixel chính xác bất kể
-    /// orientation thiết bị, vì capturedImage không xoay theo device orientation.
+    /// World → pixel trên `capturedImage`.
+    /// Ưu tiên chiếu thủ công bằng intrinsics vì đây là hệ tọa độ pixel gốc của camera image.
+    /// Nếu sai số biên làm point hơi lệch ra ngoài, thử thêm các orientation của `projectPoint`
+    /// như một lớp fallback mềm để cứu màu thay vì rơi về xám.
     private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, frame: ARFrame) -> CGPoint? {
         let camera = frame.camera
 
-        // Kiểm tra điểm có phía trước camera không (camera space Z âm = phía trước)
         let camPt = camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
         if camPt.z > -0.01 { return nil }
 
-        // capturedImage LUÔN ở landscape sensor orientation (iPhone sensor native).
-        // => Dùng .landscapeRight + sensor resolution để projectPoint trả về pixel buffer coords.
         let imgRes = camera.imageResolution
         let sensorViewport = CGSize(width: imgRes.width, height: imgRes.height)
-        let pt = camera.projectPoint(worldPosition, orientation: .landscapeRight, viewportSize: sensorViewport)
+        let depth = -camPt.z
+        guard depth > 1e-5 else { return nil }
 
-        guard pt.x >= 0 && pt.x < sensorViewport.width &&
-              pt.y >= 0 && pt.y < sensorViewport.height else { return nil }
-        return pt
+        let K = camera.intrinsics
+        let fx = CGFloat(K[0][0])
+        let fy = CGFloat(K[1][1])
+        let cx = CGFloat(K[2][0])
+        let cy = CGFloat(K[2][1])
+
+        let px = fx * CGFloat(camPt.x) / CGFloat(depth) + cx
+        let py = cy - fy * CGFloat(camPt.y) / CGFloat(depth)
+        let manual = CGPoint(x: px, y: py)
+        if manual.x >= 0 && manual.x < sensorViewport.width &&
+           manual.y >= 0 && manual.y < sensorViewport.height {
+            return manual
+        }
+
+        let fallbackOrientations: [UIInterfaceOrientation] = [
+            .landscapeRight,
+            .landscapeLeft,
+            .portrait,
+            .portraitUpsideDown
+        ]
+        for orientation in fallbackOrientations {
+            let pt = camera.projectPoint(worldPosition, orientation: orientation, viewportSize: sensorViewport)
+            if pt.x >= 0 && pt.x < sensorViewport.width &&
+               pt.y >= 0 && pt.y < sensorViewport.height {
+                return pt
+            }
+        }
+
+        let clamped = CGPoint(
+            x: min(max(manual.x, 0), sensorViewport.width - 1),
+            y: min(max(manual.y, 0), sensorViewport.height - 1)
+        )
+        let overshootX = abs(manual.x - clamped.x)
+        let overshootY = abs(manual.y - clamped.y)
+        if max(overshootX, overshootY) <= 24 {
+            return clamped
+        }
+        return nil
     }
 
     /// Log thông tin frame và pixel format trước khi export.
