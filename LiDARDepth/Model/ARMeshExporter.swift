@@ -57,10 +57,10 @@ enum ARMeshExporter {
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
     private static var frameHistory: [ARFrame] = []
-    // Keep only 4 frames — each ARFrame holds a full camera image (~18MB on iPhone Pro).
-    // Distance-gated recording in Coordinator means these 4 frames are spatially spread.
-    private static let maxHistoryFrames = 4
-    private static let maxFusionFrames = 4
+    // Giữ nhiều frame hơn để tăng độ phủ màu khi export.
+    // Vẫn giới hạn tương đối thấp để tránh giữ quá nhiều camera image trong RAM.
+    private static let maxHistoryFrames = 12
+    private static let maxFusionFrames = 8
 
     static func recordFrameForColorFusion(_ frame: ARFrame) {
         historyQueue.sync {
@@ -613,12 +613,8 @@ enum ARMeshExporter {
 
         let ndotl: Float
         if let n = worldNormal {
-            ndotl = simd_dot(simd_normalize(n), toCamera)
-            // Reject only extreme backface
-            if ndotl < -0.9 {
-                diag?.countBackface()
-                return nil
-            }
+            let nn = simd_normalize(n)
+            ndotl = simd_dot(nn, toCamera)
         } else {
             ndotl = 0.5
         }
@@ -626,15 +622,27 @@ enum ARMeshExporter {
         let projected: CGPoint
         if let p = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame) {
             projected = p
-        } else if let n = worldNormal,
-                  let p = projectWorldToImagePixel(
-                    worldPosition: worldPosition + simd_normalize(n) * 0.004,
-                    frame: frame
-                  ) {
-            projected = p
         } else {
-            diag?.countOutOfBounds()
-            return nil
+            var rescuedPoint: CGPoint?
+            if let n = worldNormal {
+                let nn = simd_normalize(n)
+                let offsets: [Float] = [0.003, 0.006, 0.010]
+                for d in offsets {
+                    if let p = projectWorldToImagePixel(worldPosition: worldPosition + nn * d, frame: frame) {
+                        rescuedPoint = p
+                        break
+                    }
+                    if let p = projectWorldToImagePixel(worldPosition: worldPosition - nn * d, frame: frame) {
+                        rescuedPoint = p
+                        break
+                    }
+                }
+            }
+            guard let p = rescuedPoint else {
+                diag?.countOutOfBounds()
+                return nil
+            }
+            projected = p
         }
 
         let pb = frame.capturedImage
@@ -642,7 +650,13 @@ enum ARMeshExporter {
         let h = CVPixelBufferGetHeight(pb)
         let sampled = sampleRGB5Tap(pixelBuffer: pb, at: projected, width: w, height: h)
 
-        let angleWeight = max(0.12, min(1.0, 0.12 + 0.88 * (ndotl + 1) * 0.5))
+        // Normals của ARMesh sau smooth/fill có thể đảo hướng cục bộ.
+        // Vì mục tiêu ở đây là lấy màu, dùng |ndotl| giúp không loại oan các mặt vẫn nhìn thấy.
+        let facing = abs(ndotl)
+        if worldNormal != nil, ndotl < -0.95 {
+            diag?.countBackface()
+        }
+        let angleWeight = max(0.35, min(1.0, 0.35 + 0.65 * facing))
         let distanceWeight = 1.0 / (1.0 + 0.65 * dist * dist)
         let borderWeight = imageBorderWeight(point: projected, width: w, height: h)
         let recency = Float(frameOrder + 1) / Float(max(totalFrames, 1))
@@ -670,9 +684,9 @@ enum ARMeshExporter {
         let nx = min(max(point.x / w, 0), 1)
         let ny = min(max(point.y / h, 0), 1)
         let edgeDistance = min(min(nx, 1 - nx), min(ny, 1 - ny))
-        // 0 at border, 1 inside safe region
-        let t = max(0, min(1, edgeDistance / 0.08))
-        return Float(0.2 + 0.8 * t)
+        // Giảm phạt ở biên để giữ màu cho nhiều vertex hơn.
+        let t = max(0, min(1, edgeDistance / 0.05))
+        return Float(0.45 + 0.55 * t)
     }
 
     private static func sampleRGBAtImage(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> SIMD3<Float> {

@@ -100,7 +100,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
         // Throttle color-frame recording: only when camera moved > threshold.
         private var lastRecordedCamPos: SIMD3<Float>?
-        private let recordDistanceThreshold: Float = 0.07  // metres
+        private let recordDistanceThreshold: Float = 0.03  // metres
 
         // Speed tracking for "too fast" warning.
         private var lastSpeedTimestamp: TimeInterval?
