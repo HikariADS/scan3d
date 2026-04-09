@@ -676,29 +676,25 @@ enum ARMeshExporter {
         return sampleRGBCoreImage(pixelBuffer: pixelBuffer, x: x, y: y, width: width, height: height)
     }
 
-    /// World → pixel trên `capturedImage` (buffer YUV/BGRA của sensor).
-    /// Dùng intrinsics trực tiếp: tránh displayTransform (dành cho render viewport, không phải buffer pixel).
+    /// World → pixel trên `capturedImage` (buffer YUV/BGRA, luôn ở sensor-native landscape).
+    /// `camera.projectPoint(.landscapeRight, sensorSize)` cho tọa độ pixel chính xác bất kể
+    /// orientation thiết bị, vì capturedImage không xoay theo device orientation.
     private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, frame: ARFrame) -> CGPoint? {
         let camera = frame.camera
-        // Chuyển về camera space
-        let camSpaceH = camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
-        let camZ = camSpaceH.z
-        if camZ > -0.01 { return nil }  // Điểm sau camera
 
-        // Intrinsics — đơn vị pixel trên capturedImage (imageResolution)
-        let K = camera.intrinsics          // column-major: K[col][row]
-        let fx = K[0][0]; let fy = K[1][1]
-        let cx = K[2][0]; let cy = K[2][1]
+        // Kiểm tra điểm có phía trước camera không (camera space Z âm = phía trước)
+        let camPt = camera.transform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
+        if camPt.z > -0.01 { return nil }
 
-        // Chiếu: u = fx * (X/Z) + cx, v = fy * (Y/Z) + cy  (Z âm → dùng -Z)
-        let X = camSpaceH.x; let Y = camSpaceH.y; let Z = -camZ   // Z dương
-        let u = CGFloat(fx * X / Z + cx)
-        let v = CGFloat(fy * Y / Z + cy)
+        // capturedImage LUÔN ở landscape sensor orientation (iPhone sensor native).
+        // => Dùng .landscapeRight + sensor resolution để projectPoint trả về pixel buffer coords.
+        let imgRes = camera.imageResolution
+        let sensorViewport = CGSize(width: imgRes.width, height: imgRes.height)
+        let pt = camera.projectPoint(worldPosition, orientation: .landscapeRight, viewportSize: sensorViewport)
 
-        let w = frame.camera.imageResolution.width
-        let h = frame.camera.imageResolution.height
-        guard u >= 0 && u < CGFloat(w) && v >= 0 && v < CGFloat(h) else { return nil }
-        return CGPoint(x: u, y: v)
+        guard pt.x >= 0 && pt.x < sensorViewport.width &&
+              pt.y >= 0 && pt.y < sensorViewport.height else { return nil }
+        return pt
     }
 
     /// Log thông tin frame và pixel format trước khi export.
