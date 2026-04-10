@@ -71,6 +71,71 @@ enum MeshLaplacianSmooth {
     static var exportHoleMaxLargeEdges: Int         = 180
     static var exportHoleFillEnabled: Bool          = true
 
+    // MARK: - Vertex welding
+
+    /// Merge vertices within `epsilon` metres to eliminate seams at ARMeshAnchor boundaries.
+    ///
+    /// Uses a uniform-grid hash for O(N) average performance.
+    /// Each cell maps to the first vertex that lands in it; subsequent vertices that hash
+    /// to the same cell are redirected to that representative.
+    /// Degenerate triangles produced by welding are removed automatically.
+    @discardableResult
+    static func weldVertices(
+        positions: inout [SIMD3<Float>],
+        triangleIndices: inout [UInt32],
+        epsilon: Float = 0.002          // 2 mm — spans typical ARKit anchor-boundary gap
+    ) -> [Int] {
+        guard !positions.isEmpty else { return [] }
+        let n = positions.count
+        let invEps = 1.0 / max(epsilon, 1e-6)
+
+        // Grid hash: quantise each coordinate and pack into a key.
+        // Using a flat dictionary avoids the 27-neighbour search needed for
+        // a strictly-correct weld, but works well in practice because ARKit
+        // boundary vertices are typically co-located within sub-mm.
+        var grid: [SIMD3<Int32>: Int] = Dictionary(minimumCapacity: n)
+        var remap = Array(repeating: 0, count: n)
+        var newPositions: [SIMD3<Float>] = []
+        newPositions.reserveCapacity(n)
+
+        for i in 0..<n {
+            let p = positions[i]
+            let key = SIMD3<Int32>(
+                Int32(floor(p.x * invEps)),
+                Int32(floor(p.y * invEps)),
+                Int32(floor(p.z * invEps))
+            )
+            if let existing = grid[key] {
+                remap[i] = existing
+            } else {
+                let newIdx = newPositions.count
+                grid[key] = newIdx
+                newPositions.append(p)
+                remap[i] = newIdx
+            }
+        }
+
+        positions = newPositions
+
+        // Remap indices and discard degenerate triangles.
+        var cleaned: [UInt32] = []
+        cleaned.reserveCapacity(triangleIndices.count)
+        for t in stride(from: 0, to: triangleIndices.count, by: 3) {
+            let ia = Int(triangleIndices[t])
+            let ib = Int(triangleIndices[t + 1])
+            let ic = Int(triangleIndices[t + 2])
+            guard ia < n, ib < n, ic < n else { continue }
+            let ra = remap[ia]; let rb = remap[ib]; let rc = remap[ic]
+            if ra != rb && rb != rc && ra != rc {
+                cleaned.append(UInt32(ra))
+                cleaned.append(UInt32(rb))
+                cleaned.append(UInt32(rc))
+            }
+        }
+        triangleIndices = cleaned
+        return remap
+    }
+
     // MARK: - Main dispatch
 
     /// Applies the currently-configured smoothing mode to the mesh.

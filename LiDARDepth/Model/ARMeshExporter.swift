@@ -85,15 +85,15 @@ enum ARMeshExporter {
         }
         var depthToleranceBase: Float {
             switch subject {
-            case .room: return 0.06
-            case .nearbyObject: return 0.05
-            case .ultraDetailObject: return 0.06
+            case .room: return 0.18      // generous base — avoids rejecting valid samples near floors/walls
+            case .nearbyObject: return 0.10
+            case .ultraDetailObject: return 0.08
             }
         }
         var depthToleranceScale: Float {
             switch subject {
-            case .room: return 0.08
-            case .nearbyObject: return 0.08
+            case .room: return 0.18      // scale with distance so far walls also pass
+            case .nearbyObject: return 0.12
             case .ultraDetailObject: return 0.10
             }
         }
@@ -130,16 +130,24 @@ enum ARMeshExporter {
         }
         var saturationBoost: Float {
             switch subject {
-            case .room: return 1.12
-            case .nearbyObject: return 1.38
-            case .ultraDetailObject: return 1.48
+            case .room: return 1.55
+            case .nearbyObject: return 1.70
+            case .ultraDetailObject: return 1.80
             }
         }
         var contrastBoost: Float {
             switch subject {
-            case .room: return 1.04
-            case .nearbyObject: return 1.10
-            case .ultraDetailObject: return 1.14
+            case .room: return 1.15
+            case .nearbyObject: return 1.22
+            case .ultraDetailObject: return 1.28
+            }
+        }
+        /// Gamma < 1 brightens mid-tones (makes dark vertex colors visible).
+        var gammaCorrection: Float {
+            switch subject {
+            case .room: return 0.82
+            case .nearbyObject: return 0.88
+            case .ultraDetailObject: return 0.92
             }
         }
     }
@@ -595,8 +603,11 @@ enum ARMeshExporter {
         let p1 = p0 + normData.count
         let p2 = p1 + colorData.count
 
+        // KHR_materials_unlit: display vertex colors directly without PBR lighting.
+        // Without this extension, PBR with roughness=1 and no IBL environment makes
+        // the mesh appear dark/black in most viewers even when vertex colors are correct.
         let json: String = """
-        {"asset":{"version":"2.0","generator":"LiDARDepth"},"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"indices":3,"material":0}]}],"materials":[{"doubleSided":true,"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1],"metallicFactor":0,"roughnessFactor":1}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p2),"byteLength":\(indexData.count),"target":\(gltfElementArrayBuffer)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5121,"normalized":true,"count":\(vertexCount),"type":"VEC4"},{"bufferView":3,"componentType":5125,"count":\(indices.count),"type":"SCALAR"}]}
+        {"asset":{"version":"2.0","generator":"LiDARDepth"},"extensionsUsed":["KHR_materials_unlit"],"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"indices":3,"material":0}]}],"materials":[{"doubleSided":true,"extensions":{"KHR_materials_unlit":{}},"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1]}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p2),"byteLength":\(indexData.count),"target":\(gltfElementArrayBuffer)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5121,"normalized":true,"count":\(vertexCount),"type":"VEC4"},{"bufferView":3,"componentType":5125,"count":\(indices.count),"type":"SCALAR"}]}
         """
 
         var jsonData = Data(json.utf8)
@@ -697,23 +708,34 @@ enum ARMeshExporter {
     }
 
     private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
-        var result: [PreparedMesh] = []
-        let camPos = cameraPosition(frame: frame)
+        // Merge all anchors into one combined mesh before smoothing.
+        // This lets bilateral smoothing work across anchor boundaries and
+        // vertex welding closes the seam gaps that appear as black lines.
+        var allPositions: [SIMD3<Float>] = []
+        var allIndices: [UInt32] = []
+        var vertexOffset: UInt32 = 0
 
         for anchor in meshAnchors {
-            let geometry = anchor.geometry
-            var verts = worldVertexPositions(geometry: geometry, transform: anchor.transform)
-            var indices = triangleIndices(geometry: geometry)
-            MeshLaplacianSmooth.smooth(positions: &verts, triangleIndices: indices)
-            MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &verts, triangleIndices: &indices)
-            let normals = MeshLaplacianSmooth.vertexNormals(positions: verts, triangleIndices: indices)
-
-            let filtered = filterMesh(positions: verts, normals: normals, indices: indices, cameraPosition: camPos, profile: profile)
-            if !filtered.indices.isEmpty {
-                result.append(filtered)
-            }
+            let verts   = worldVertexPositions(geometry: anchor.geometry, transform: anchor.transform)
+            let indices = triangleIndices(geometry: anchor.geometry)
+            allPositions.append(contentsOf: verts)
+            allIndices.append(contentsOf: indices.map { $0 + vertexOffset })
+            vertexOffset += UInt32(verts.count)
         }
-        return result
+
+        guard !allPositions.isEmpty else { return [] }
+
+        // Weld vertices within 2 mm to seal anchor-boundary seams.
+        MeshLaplacianSmooth.weldVertices(positions: &allPositions, triangleIndices: &allIndices, epsilon: 0.002)
+
+        // Smooth + hole-fill on the unified mesh (cross-boundary neighbours now exist).
+        MeshLaplacianSmooth.smooth(positions: &allPositions, triangleIndices: allIndices)
+        MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &allPositions, triangleIndices: &allIndices)
+
+        let normals = MeshLaplacianSmooth.vertexNormals(positions: allPositions, triangleIndices: allIndices)
+        let camPos  = cameraPosition(frame: frame)
+        let filtered = filterMesh(positions: allPositions, normals: normals, indices: allIndices, cameraPosition: camPos, profile: profile)
+        return filtered.indices.isEmpty ? [] : [filtered]
     }
 
     private static func filterMesh(
@@ -723,13 +745,6 @@ enum ARMeshExporter {
         cameraPosition: SIMD3<Float>,
         profile: ExportProfile
     ) -> PreparedMesh {
-        guard profile.subject == .nearbyObject else {
-            if profile.subject == .ultraDetailObject {
-                // rơi xuống nhánh lọc mạnh hơn bên dưới
-            } else {
-                return PreparedMesh(positions: positions, normals: normals, indices: indices)
-            }
-        }
         if profile.subject == .room {
             return PreparedMesh(positions: positions, normals: normals, indices: indices)
         }
@@ -1269,11 +1284,24 @@ enum ARMeshExporter {
     }
 
     private static func enhanceSampledColor(_ color: SIMD3<Float>, profile: ExportProfile) -> SIMD3<Float> {
+        // 1. Saturation boost
         let luminance = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
         let gray = SIMD3<Float>(repeating: luminance)
         let boostedSat = gray + (color - gray) * profile.saturationBoost
+
+        // 2. Contrast boost
         let boostedContrast = (boostedSat - SIMD3<Float>(repeating: 0.5)) * profile.contrastBoost + SIMD3<Float>(repeating: 0.5)
-        return simd_clamp(boostedContrast, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        let clamped = simd_clamp(boostedContrast, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+
+        // 3. Gamma correction — gamma < 1 lifts dark mid-tones so dimly-lit
+        //    surfaces don't appear black in the viewer.
+        let gamma = profile.gammaCorrection
+        let corrected = SIMD3<Float>(
+            pow(clamped.x, gamma),
+            pow(clamped.y, gamma),
+            pow(clamped.z, gamma)
+        )
+        return simd_clamp(corrected, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
     }
 
     private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
