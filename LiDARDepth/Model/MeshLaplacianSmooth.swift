@@ -322,14 +322,14 @@ enum MeshLaplacianSmooth {
             exportIterations        = 2    // used only by the light Taubin post-pass
             exportLambda            = 0.15
             exportMu                = -0.17
-            bilateralIterations     = 4
-            bilateralSpatialSigma   = 0.050
-            bilateralNormalSigma    = 0.30
+            bilateralIterations     = 5    // extra iteration for smoother large flat surfaces
+            bilateralSpatialSigma   = 0.065 // wider neighbourhood → floor/wall/ceiling get flat
+            bilateralNormalSigma    = 0.28  // tighter normal band → sharp edges preserved
             exportHoleFillEnabled   = true
-            exportHoleMaxEdges      = 72
-            exportHoleMaxRadius     = 0.18
-            exportHoleMaxPlanarDeviation = 0.018
-            exportHoleMaxLargeEdges = 240
+            exportHoleMaxEdges      = 120  // fill bigger boundary loops
+            exportHoleMaxRadius     = 0.35 // up to 35 cm radius holes filled
+            exportHoleMaxPlanarDeviation = 0.025
+            exportHoleMaxLargeEdges = 360  // complex concave boundaries handled
         }
     }
 

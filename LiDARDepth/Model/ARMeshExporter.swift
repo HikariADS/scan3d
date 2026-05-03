@@ -21,6 +21,14 @@ private final class ColorDiag: @unchecked Sendable {
     private var _fallbackDepthMismatch = 0
     private var _fallbackNoFrames = 0
     private var _fallbackZeroWeight = 0
+    private var _sumColor = SIMD3<Float>(repeating: 0)
+    private var _sumLuma: Float = 0
+    private var _sumSaturation: Float = 0
+    private var _minLuma: Float = 1
+    private var _maxLuma: Float = 0
+    private var _sumWeight: Float = 0
+    private var _sumBestWeight: Float = 0
+    private var _fusionSamples = 0
 
     func countVertex()           { q.sync { _total += 1} }
     func countColor()            { q.sync { _gotColor += 1 } }
@@ -30,15 +38,43 @@ private final class ColorDiag: @unchecked Sendable {
     func countDepthMismatch()    { q.sync { _fallbackDepthMismatch += 1 } }
     func countNoFrames()         { q.sync { _fallbackNoFrames += 1 } }
     func countZeroWeight()       { q.sync { _fallbackZeroWeight += 1 } }
+    func recordResolvedColor(_ color: SIMD3<Float>) {
+        q.sync {
+            _sumColor += color
+            let luma = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
+            let maxC = max(color.x, max(color.y, color.z))
+            let minC = min(color.x, min(color.y, color.z))
+            _sumLuma += luma
+            _sumSaturation += maxC - minC
+            _minLuma = min(_minLuma, luma)
+            _maxLuma = max(_maxLuma, luma)
+        }
+    }
+    func recordFusion(weight: Float, bestWeight: Float) {
+        q.sync {
+            _sumWeight += weight
+            _sumBestWeight += bestWeight
+            _fusionSamples += 1
+        }
+    }
 
     func printSummary(tag: String) {
         q.sync {
             let gray = _total - _gotColor
+            let avgColor = _gotColor > 0 ? _sumColor / Float(_gotColor) : SIMD3<Float>(repeating: 0)
+            let avgLuma = _gotColor > 0 ? _sumLuma / Float(_gotColor) : 0
+            let avgSaturation = _gotColor > 0 ? _sumSaturation / Float(_gotColor) : 0
+            let avgWeight = _fusionSamples > 0 ? _sumWeight / Float(_fusionSamples) : 0
+            let avgBestWeight = _fusionSamples > 0 ? _sumBestWeight / Float(_fusionSamples) : 0
             print("""
 [ColorDiag] === \(tag) ===
   Tổng vertices  : \(_total)
   Có màu thật   : \(_gotColor) (\(pct(_gotColor, _total))%)
   Xám fallback   : \(gray) (\(pct(gray, _total))%)
+  Avg RGB        : \(fmt(avgColor.x)) / \(fmt(avgColor.y)) / \(fmt(avgColor.z))
+  Avg luma/sat   : \(fmt(avgLuma)) / \(fmt(avgSaturation))
+  Luma min-max   : \(fmt(_minLuma)) ... \(fmt(_maxLuma))
+  Avg weight     : \(fmt(avgWeight)) (best \(fmt(avgBestWeight)))
     behind cam   : \(_fallbackBehindCam)
     backface ext  : \(_fallbackBackface)
     out of bounds : \(_fallbackOutOfBounds)
@@ -52,6 +88,90 @@ private final class ColorDiag: @unchecked Sendable {
     private func pct(_ n: Int, _ d: Int) -> String {
         guard d > 0 else { return "0" }
         return String(format: "%.1f", Float(n) / Float(d) * 100)
+    }
+
+    private func fmt(_ value: Float) -> String {
+        String(format: "%.3f", value)
+    }
+}
+
+private final class TextureDiag {
+    private var totalVertices = 0
+    private var mappedVertices = 0
+    private var relaxedMappedVertices = 0
+    private var unmappedVertices = 0
+    private var rejectedOutOfBounds = 0
+    private var rejectedDepthMismatch = 0
+    private var rejectedFacing = 0
+    private var scoreSum: Float = 0
+    private var scoreMin: Float = .greatestFiniteMagnitude
+    private var scoreMax: Float = 0
+    private var uvMin = SIMD2<Float>(repeating: 1)
+    private var uvMax = SIMD2<Float>(repeating: 0)
+    private var frameUsage: [Int: Int] = [:]
+
+    func countVertex() {
+        totalVertices += 1
+    }
+
+    func countMapped(frameIndex: Int, score: Float, u: Float, v: Float, relaxed: Bool) {
+        mappedVertices += 1
+        if relaxed {
+            relaxedMappedVertices += 1
+        }
+        scoreSum += score
+        scoreMin = min(scoreMin, score)
+        scoreMax = max(scoreMax, score)
+        uvMin = simd_min(uvMin, SIMD2<Float>(u, v))
+        uvMax = simd_max(uvMax, SIMD2<Float>(u, v))
+        frameUsage[frameIndex, default: 0] += 1
+    }
+
+    func countUnmapped() {
+        unmappedVertices += 1
+    }
+
+    func countOutOfBounds() {
+        rejectedOutOfBounds += 1
+    }
+
+    func countDepthMismatch() {
+        rejectedDepthMismatch += 1
+    }
+
+    func countFacingRejected() {
+        rejectedFacing += 1
+    }
+
+    func printSummary(tag: String, atlasFrameCount: Int, atlasSize: CGSize, jpegBytes: Int) {
+        let avgScore = mappedVertices > 0 ? scoreSum / Float(mappedVertices) : 0
+        let scoreMinValue = mappedVertices > 0 ? scoreMin : 0
+        let scoreMaxValue = mappedVertices > 0 ? scoreMax : 0
+        let usage = frameUsage.keys.sorted().map { "#\($0):\(frameUsage[$0] ?? 0)" }.joined(separator: ", ")
+        print("""
+[TextureDiag] === \(tag) ===
+  Atlas frames    : \(atlasFrameCount)
+  Atlas size      : \(Int(atlasSize.width)) x \(Int(atlasSize.height))
+  JPEG size       : \(jpegBytes / 1024) KB
+  UV mapped       : \(mappedVertices) / \(totalVertices) (\(pct(mappedVertices, totalVertices))%)
+  UV relaxed      : \(relaxedMappedVertices)
+  UV fallback     : \(unmappedVertices)
+  Score avg/min/max: \(fmt(avgScore)) / \(fmt(scoreMinValue)) / \(fmt(scoreMaxValue))
+  UV bounds       : u \(fmt(uvMin.x))...\(fmt(uvMax.x)), v \(fmt(uvMin.y))...\(fmt(uvMax.y))
+  Rejected OOB    : \(rejectedOutOfBounds)
+  Rejected depth  : \(rejectedDepthMismatch)
+  Rejected facing : \(rejectedFacing)
+  Frame usage     : \(usage.isEmpty ? "none" : usage)
+""")
+    }
+
+    private func pct(_ n: Int, _ d: Int) -> String {
+        guard d > 0 else { return "0" }
+        return String(format: "%.1f", Float(n) / Float(d) * 100)
+    }
+
+    private func fmt(_ value: Float) -> String {
+        String(format: "%.3f", value)
     }
 }
 
@@ -83,16 +203,20 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 1.1
             }
         }
+        /// For room scans, skip the depth consistency check entirely so every
+        /// camera frame can contribute colour even on floors/ceilings/far walls
+        /// where the LiDAR depth map may not perfectly align with the mesh.
+        var skipDepthCheck: Bool { subject == .room }
         var depthToleranceBase: Float {
             switch subject {
-            case .room: return 0.18      // generous base — avoids rejecting valid samples near floors/walls
+            case .room: return 0.18
             case .nearbyObject: return 0.10
             case .ultraDetailObject: return 0.08
             }
         }
         var depthToleranceScale: Float {
             switch subject {
-            case .room: return 0.18      // scale with distance so far walls also pass
+            case .room: return 0.18
             case .nearbyObject: return 0.12
             case .ultraDetailObject: return 0.10
             }
@@ -123,31 +247,35 @@ enum ARMeshExporter {
         }
         var bestFrameBlend: Float {
             switch subject {
-            case .room: return 0.0
-            case .nearbyObject: return 0.68
-            case .ultraDetailObject: return 0.86
+            // 0.45: blend best frame equally with the multi-frame average so a
+            // single overexposed frame cannot wash out the final colour.
+            case .room: return 0.45
+            case .nearbyObject: return 0.55
+            case .ultraDetailObject: return 0.65
             }
         }
         var saturationBoost: Float {
             switch subject {
-            case .room: return 1.55
-            case .nearbyObject: return 1.70
-            case .ultraDetailObject: return 1.80
+            case .room: return 2.20   // strong — recover vivid real-world colours
+            case .nearbyObject: return 2.40
+            case .ultraDetailObject: return 2.60
             }
         }
+        /// S-curve contrast strength. Higher = more tonal separation (dark→dark, bright→bright).
         var contrastBoost: Float {
             switch subject {
-            case .room: return 1.15
-            case .nearbyObject: return 1.22
-            case .ultraDetailObject: return 1.28
+            case .room: return 1.55   // punchy — keeps whites distinct from mid-tones
+            case .nearbyObject: return 1.70
+            case .ultraDetailObject: return 1.85
             }
         }
-        /// Gamma < 1 brightens mid-tones (makes dark vertex colors visible).
+        /// Gamma > 1 darkens the image. Use to counter the over-bright (washed-out) look
+        /// produced by ARKit's auto-exposed camera frames.
         var gammaCorrection: Float {
             switch subject {
-            case .room: return 0.82
-            case .nearbyObject: return 0.88
-            case .ultraDetailObject: return 0.92
+            case .room: return 1.20   // darken ~20 % — prevents blown-out surfaces
+            case .nearbyObject: return 1.12
+            case .ultraDetailObject: return 1.05
             }
         }
     }
@@ -166,14 +294,133 @@ enum ARMeshExporter {
         }
     }
 
+    // MARK: - Reference Points (for mesh alignment export)
+
+    struct ReferencePoint: Identifiable {
+        let id: UUID
+        let worldPosition: SIMD3<Float>
+        let label: String
+        let timestamp: Date
+
+        init(id: UUID = UUID(), worldPosition: SIMD3<Float>, label: String) {
+            self.id = id
+            self.worldPosition = worldPosition
+            self.label = label
+            self.timestamp = Date()
+        }
+    }
+
+    private static let refQueue = DispatchQueue(label: "ARMeshExporter.refPoints")
+    private static var _referencePoints: [ReferencePoint] = []
+
+    static var referencePointCount: Int { refQueue.sync { _referencePoints.count } }
+
+    static func addReferencePoint(_ point: ReferencePoint) {
+        refQueue.sync { _referencePoints.append(point) }
+    }
+
+    static func clearReferencePoints() {
+        refQueue.sync { _referencePoints.removeAll() }
+    }
+
+    /// Encodes all reference points as pretty-printed JSON ready to ship alongside the OBJ.
+    /// Returns nil if no points have been placed.
+    static func buildReferencePointsJSON() -> Data? {
+        let points = refQueue.sync { _referencePoints }
+        guard !points.isEmpty else { return nil }
+
+        struct PointEntry: Encodable {
+            let id: String; let label: String
+            let x, y, z: Float
+        }
+        struct Export: Encodable {
+            let units: String
+            let description: String
+            let cloudcompare_tip: String
+            let points: [PointEntry]
+        }
+        let export = Export(
+            units: "meters",
+            description: "ARKit world-space reference points for mesh alignment.",
+            cloudcompare_tip: "CloudCompare: Tools > Registration > Align (Point Pairs Picking). Match each labeled point to the same feature on your reference CAD/mesh.",
+            points: points.map { PointEntry(id: $0.id.uuidString, label: $0.label, x: $0.worldPosition.x, y: $0.worldPosition.y, z: $0.worldPosition.z) }
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return try? encoder.encode(export)
+    }
+
+    // MARK: - Frozen mesh blocks (Polycam-style block scanning)
+
+    /// A snapshot of world-space geometry captured when the user presses "Chụp vùng".
+    /// Frozen blocks persist regardless of ARKit anchor updates so triangles
+    /// from already-scanned areas are never lost when the camera moves away.
+    struct FrozenMeshBlock {
+        let positions: [SIMD3<Float>]
+        let indices: [UInt32]
+        let capturedAt: Date
+    }
+
+    private static let frozenQueue = DispatchQueue(label: "ARMeshExporter.frozen")
+    private static var _frozenBlocks: [FrozenMeshBlock] = []
+    /// IDs of ARMeshAnchors whose geometry has been committed to a frozen block.
+    /// prepareMeshes skips these from the live session to avoid double-counting.
+    private static var _frozenAnchorIDs: Set<UUID> = []
+
+    static var frozenBlockCount: Int {
+        frozenQueue.sync { _frozenBlocks.count }
+    }
+
+    static var frozenBlocks: [FrozenMeshBlock] {
+        frozenQueue.sync { _frozenBlocks }
+    }
+
+    /// IDs already snapshotted — used by prepareMeshes to skip live duplicates.
+    static var frozenAnchorIDs: Set<UUID> {
+        frozenQueue.sync { _frozenAnchorIDs }
+    }
+
+    /// Snapshot the given anchors and mark their IDs as frozen.
+    /// Subsequent exports will use the snapshot and skip the live anchor data.
+    static func freezeCurrentAnchors(_ anchors: [ARMeshAnchor]) {
+        var positions: [SIMD3<Float>] = []
+        var indices: [UInt32] = []
+        var offset: UInt32 = 0
+        var ids: Set<UUID> = []
+        for anchor in anchors {
+            let verts = worldVertexPositions(geometry: anchor.geometry, transform: anchor.transform)
+            let idx   = triangleIndices(geometry: anchor.geometry)
+            positions.append(contentsOf: verts)
+            indices.append(contentsOf: idx.map { $0 + offset })
+            offset += UInt32(verts.count)
+            ids.insert(anchor.identifier)
+        }
+        guard !positions.isEmpty else { return }
+        let block = FrozenMeshBlock(positions: positions, indices: indices, capturedAt: Date())
+        frozenQueue.sync {
+            _frozenBlocks.append(block)
+            _frozenAnchorIDs.formUnion(ids)
+        }
+    }
+
+    /// Remove all frozen blocks and clear the frozen-anchor ID set.
+    static func clearFrozenBlocks() {
+        frozenQueue.sync {
+            _frozenBlocks.removeAll()
+            _frozenAnchorIDs.removeAll()
+        }
+    }
+
     // MARK: - Multi-frame color history
 
     private static let historyQueue = DispatchQueue(label: "ARMeshExporter.frameHistory")
     private static var frameHistory: [ARFrame] = []
     private static var patchFrameHistory: [UUID: [ARFrame]] = [:]
-    // Giữ nhiều frame hơn để tăng độ phủ màu và texture khi export vật gần.
-    private static let maxHistoryFrames = 64
-    private static let maxFusionFrames = 32
+    // Large history = frames from every part of the room stay in the pool.
+    // Proximity-based selection in fusionFrames() picks the closest N per vertex,
+    // so increasing this never hurts quality and only costs ~3.7 MB per extra frame.
+    private static let maxHistoryFrames = 250
+    private static let maxFusionFrames  = 64
 
     static func recordFrameForColorFusion(_ frame: ARFrame) {
         recordFrameForColorFusion(frame, cameraPosition: nil, detailPatches: [], preferPatchHistory: false)
@@ -220,30 +467,86 @@ enum ARMeshExporter {
     }
 
     private static func fusionFrames(including current: ARFrame) -> [ARFrame] {
-        fusionFrames(including: current, preferredPatchID: nil)
+        fusionFrames(nearVertex: nil, including: current, preferredPatchID: nil)
     }
 
     private static func fusionFrames(including current: ARFrame, preferredPatchID: UUID?) -> [ARFrame] {
+        fusionFrames(nearVertex: nil, including: current, preferredPatchID: preferredPatchID)
+    }
+
+    /// Proximity-based frame selection: use the FULL history but sort frames by
+    /// camera-to-vertex distance so each vertex is coloured from the frames
+    /// recorded when the camera was **closest to that surface**.
+    ///
+    /// This fixes the "gray room" bug where suffix-based selection only returned
+    /// frames from the most recently scanned area, leaving earlier areas colourless.
+    private static func fusionFrames(
+        nearVertex vertexPosition: SIMD3<Float>?,
+        including current: ARFrame,
+        preferredPatchID: UUID?
+    ) -> [ARFrame] {
         historyQueue.sync {
-            var candidates = Array(frameHistory.suffix(maxFusionFrames))
+            // 1. Gather full history (not just suffix).
+            var allFrames = frameHistory
             if let preferredPatchID, let patchFrames = patchFrameHistory[preferredPatchID] {
-                candidates.append(contentsOf: patchFrames.suffix(maxFusionFrames))
+                allFrames.append(contentsOf: patchFrames)
+            }
+            // Ensure current frame is included.
+            if !allFrames.contains(where: { abs($0.timestamp - current.timestamp) < 1e-4 }) {
+                allFrames.append(current)
             }
 
-            var unique: [ARFrame] = []
+            // 2. Deduplicate by timestamp.
             var seen: [TimeInterval] = []
-            for frame in candidates.reversed() {
-                if seen.contains(where: { abs($0 - frame.timestamp) < 1e-4 }) { continue }
-                seen.append(frame.timestamp)
-                unique.append(frame)
-                if unique.count >= maxFusionFrames { break }
+            var unique: [ARFrame] = []
+            unique.reserveCapacity(allFrames.count)
+            for f in allFrames {
+                if seen.contains(where: { abs($0 - f.timestamp) < 1e-4 }) { continue }
+                seen.append(f.timestamp)
+                unique.append(f)
             }
-            unique.reverse()
 
-            if unique.contains(where: { abs($0.timestamp - current.timestamp) < 1e-4 }) {
-                return unique
+            if unique.count <= maxFusionFrames { return unique }
+
+            // 3. Mixed selection: 2/3 proximity-closest + 1/3 temporal diversity.
+            //
+            // Pure proximity selection causes COLOR SEAMS at anchor boundaries:
+            //   vertex A (anchor left)  → picks frames [F10…F42]
+            //   vertex B (anchor right) → picks frames [F80…F112]
+            //   → hard colour jump at the boundary seam.
+            //
+            // Mixing in temporally-distributed frames ensures EVERY vertex always
+            // gets a representative sample from across the full scan timeline,
+            // reducing inter-frame colour inconsistency at boundaries.
+            // The distance weight in evaluateFrameColor then handles prioritising
+            // the geometrically closest frames naturally.
+            if let vpos = vertexPosition {
+                unique.sort {
+                    let pa = SIMD3<Float>($0.camera.transform.columns.3.x,
+                                         $0.camera.transform.columns.3.y,
+                                         $0.camera.transform.columns.3.z)
+                    let pb = SIMD3<Float>($1.camera.transform.columns.3.x,
+                                         $1.camera.transform.columns.3.y,
+                                         $1.camera.transform.columns.3.z)
+                    return simd_length(pa - vpos) < simd_length(pb - vpos)
+                }
+                let proxCount = (maxFusionFrames * 2) / 3          // e.g. 42 of 64
+                let tempCount = maxFusionFrames - proxCount         // e.g. 22 of 64
+                let proxFrames = Array(unique.prefix(proxCount))
+                // Temporal sample from the frames NOT already chosen by proximity.
+                let remaining  = Array(unique.dropFirst(proxCount))
+                var tempFrames: [ARFrame] = []
+                if !remaining.isEmpty {
+                    let step = max(1, remaining.count / max(1, tempCount))
+                    tempFrames = stride(from: 0, to: remaining.count, by: step)
+                        .prefix(tempCount).map { remaining[$0] }
+                }
+                return proxFrames + tempFrames
             }
-            return Array((unique + [current]).suffix(maxFusionFrames))
+
+            // No vertex position: pure evenly-distributed temporal sampling.
+            let step = max(1, unique.count / maxFusionFrames)
+            return stride(from: 0, to: unique.count, by: step).map { unique[$0] }
         }
     }
 
@@ -303,6 +606,8 @@ enum ARMeshExporter {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else { return nil }
+        let textureDiag = TextureDiag()
+        logExportHeader(tag: "TexturedOBJ", frame: frame)
 
         let frames = fusionFrames(including: frame)
         let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
@@ -328,18 +633,34 @@ enum ARMeshExporter {
             for i in 0..<mesh.positions.count {
                 let v = mesh.positions[i]
                 let n = mesh.normals[i]
+                textureDiag.countVertex()
                 vSection += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
                 vnSection += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
 
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
                 let localProfile = profileForPosition(v, baseProfile: profile, detailPatches: detailPatches)
-                if let bestProjection = bestTextureProjection(worldPosition: v, normal: n, frames: atlasFrames, profile: localProfile) {
+                if let bestProjection = bestTextureProjection(
+                    worldPosition: v,
+                    normal: n,
+                    frames: atlasFrames,
+                    profile: localProfile,
+                    diag: textureDiag
+                ) {
                     let tile = atlas.tiles[bestProjection.frameIndex]
                     let atlasX = tile.origin.x + bestProjection.point.x
                     let atlasY = tile.origin.y + bestProjection.point.y
                     u = Float(max(0, min(atlasX / texW, 1)))
                     vCoord = Float(max(0, min(1 - atlasY / texH, 1)))
+                    textureDiag.countMapped(
+                        frameIndex: bestProjection.frameIndex,
+                        score: bestProjection.score,
+                        u: u,
+                        v: vCoord,
+                        relaxed: bestProjection.isRelaxed
+                    )
+                } else {
+                    textureDiag.countUnmapped()
                 }
                 vtSection += String(format: "vt %.6f %.6f\n", u, vCoord)
             }
@@ -364,6 +685,12 @@ enum ARMeshExporter {
         illum 1
         map_Kd \(textureFilename)
         """
+        textureDiag.printSummary(
+            tag: "TexturedOBJ",
+            atlasFrameCount: atlasFrames.count,
+            atlasSize: atlas.size,
+            jpegBytes: atlas.jpegData.count
+        )
         return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: atlas.jpegData)
     }
 
@@ -555,7 +882,68 @@ enum ARMeshExporter {
         let vertexCount = positions.count / 3
         guard vertexCount > 0, !indicesOut.isEmpty else { return nil }
         diag.printSummary(tag: "GLB")
+
+        // 2 passes of Laplacian colour smoothing at 28% strength.
+        // Pass 1 softens the hard colour discontinuity at anchor boundaries.
+        // Pass 2 diffuses the remaining gradient so transitions are visually seamless.
+        // 28% strength keeps sharp real-world colour edges (e.g. wall-floor junction)
+        // intact while dissolving the 1–2 vertex-wide seam bands.
+        smoothVertexColors(colors: &colors, indices: indicesOut,
+                           vertexCount: vertexCount, passes: 2, strength: 0.28)
+
         return encodeIndexedGLB(positions: positions, normals: normals, colors: colors, indices: indicesOut, vertexCount: vertexCount)
+    }
+
+    /// Laplacian color smoothing: blends each vertex colour with its mesh neighbours.
+    /// One pass with strength ≈ 0.20–0.30 is enough to dissolve the hard colour
+    /// discontinuities that appear at ARMeshAnchor boundaries without visibly
+    /// blurring sharp real-world colour edges.
+    ///
+    /// - Parameters:
+    ///   - colors:      flat [r,g,b, r,g,b, …] Float array, modified in-place.
+    ///   - indices:     triangle index buffer (UInt32 triples).
+    ///   - vertexCount: number of vertices.
+    ///   - passes:      number of smoothing iterations (1 = light, 2 = strong).
+    ///   - strength:    blend factor 0–1 (0 = no change, 1 = full neighbour average).
+    private static func smoothVertexColors(
+        colors: inout [Float],
+        indices: [UInt32],
+        vertexCount: Int,
+        passes: Int,
+        strength: Float
+    ) {
+        guard vertexCount > 0, passes > 0, strength > 0 else { return }
+
+        // Build neighbour lists from the triangle index buffer.
+        // Allowing duplicates is intentional: shared (interior) edges appear twice,
+        // giving them a slightly higher weight — which is geometrically correct.
+        var neighbors: [[Int]] = Array(repeating: [], count: vertexCount)
+        for i in stride(from: 0, to: indices.count, by: 3) {
+            let i0 = Int(indices[i]), i1 = Int(indices[i + 1]), i2 = Int(indices[i + 2])
+            neighbors[i0].append(i1); neighbors[i0].append(i2)
+            neighbors[i1].append(i0); neighbors[i1].append(i2)
+            neighbors[i2].append(i0); neighbors[i2].append(i1)
+        }
+
+        let inv_s = 1.0 - strength
+        for _ in 0..<passes {
+            var next = colors
+            for i in 0..<vertexCount {
+                let ns = neighbors[i]
+                guard !ns.isEmpty else { continue }
+                var ar: Float = 0, ag: Float = 0, ab: Float = 0
+                for n in ns {
+                    ar += colors[n * 3]
+                    ag += colors[n * 3 + 1]
+                    ab += colors[n * 3 + 2]
+                }
+                let k = Float(ns.count)
+                next[i * 3]     = colors[i * 3]     * inv_s + (ar / k) * strength
+                next[i * 3 + 1] = colors[i * 3 + 1] * inv_s + (ag / k) * strength
+                next[i * 3 + 2] = colors[i * 3 + 2] * inv_s + (ab / k) * strength
+            }
+            colors = next
+        }
     }
 
     /// glTF 2.0: `ARRAY_BUFFER` / `ELEMENT_ARRAY_BUFFER` (OpenGL ES constants).
@@ -705,6 +1093,7 @@ enum ARMeshExporter {
         let frameIndex: Int
         let point: CGPoint
         let score: Float
+        let isRelaxed: Bool
     }
 
     private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
@@ -715,7 +1104,19 @@ enum ARMeshExporter {
         var allIndices: [UInt32] = []
         var vertexOffset: UInt32 = 0
 
-        for anchor in meshAnchors {
+        // 1. Prepend geometry from all frozen blocks (block-scan mode).
+        //    These snapshots are stable — they don't change even if ARKit
+        //    removes or updates the corresponding anchors later.
+        for block in frozenBlocks {
+            allPositions.append(contentsOf: block.positions)
+            allIndices.append(contentsOf: block.indices.map { $0 + vertexOffset })
+            vertexOffset += UInt32(block.positions.count)
+        }
+
+        // 2. Append live ARMeshAnchor data — skip any anchor whose geometry has
+        //    already been committed to a frozen block to avoid double-counting.
+        let frozenIDs = frozenAnchorIDs
+        for anchor in meshAnchors where !frozenIDs.contains(anchor.identifier) {
             let verts   = worldVertexPositions(geometry: anchor.geometry, transform: anchor.transform)
             let indices = triangleIndices(geometry: anchor.geometry)
             allPositions.append(contentsOf: verts)
@@ -725,8 +1126,8 @@ enum ARMeshExporter {
 
         guard !allPositions.isEmpty else { return [] }
 
-        // Weld vertices within 2 mm to seal anchor-boundary seams.
-        MeshLaplacianSmooth.weldVertices(positions: &allPositions, triangleIndices: &allIndices, epsilon: 0.002)
+        // Weld vertices within 5 mm to seal anchor-boundary seams.
+        MeshLaplacianSmooth.weldVertices(positions: &allPositions, triangleIndices: &allIndices, epsilon: 0.005)
 
         // Smooth + hole-fill on the unified mesh (cross-boundary neighbours now exist).
         MeshLaplacianSmooth.smooth(positions: &allPositions, triangleIndices: allIndices)
@@ -1016,11 +1417,11 @@ enum ARMeshExporter {
         profile: ExportProfile,
         preferredPatchID: UUID?
     ) -> SIMD3<Float> {
-        let frames = fusionFrames(including: frame, preferredPatchID: preferredPatchID)
-        if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.55) }
+        let frames = fusionFrames(nearVertex: worldPosition, including: frame, preferredPatchID: preferredPatchID)
+        if frames.isEmpty { diag?.countNoFrames(); return SIMD3<Float>(repeating: 0.45) }
         var colorAccum = SIMD3<Float>(0, 0, 0)
         var weightAccum: Float = 0
-        var bestColor = SIMD3<Float>(repeating: 0.55)
+        var bestColor = SIMD3<Float>(repeating: 0.45)
         var bestWeight: Float = -.greatestFiniteMagnitude
 
         for (idx, f) in frames.enumerated() {
@@ -1043,6 +1444,7 @@ enum ARMeshExporter {
 
         if weightAccum > 1e-5 {
             diag?.countColor()
+            diag?.recordFusion(weight: weightAccum, bestWeight: bestWeight)
             let fused = simd_clamp(colorAccum / weightAccum, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
             let finalColor: SIMD3<Float>
             if profile.bestFrameBlend > 0, bestWeight > 0 {
@@ -1050,10 +1452,12 @@ enum ARMeshExporter {
             } else {
                 finalColor = fused
             }
-            return enhanceSampledColor(finalColor, profile: profile)
+            let enhanced = enhanceSampledColor(finalColor, profile: profile)
+            diag?.recordResolvedColor(enhanced)
+            return enhanced
         }
         diag?.countZeroWeight()
-        return SIMD3<Float>(repeating: 0.55)
+        return SIMD3<Float>(repeating: 0.45)
     }
 
     private static func evaluateFrameColor(
@@ -1123,15 +1527,16 @@ enum ARMeshExporter {
             diag?.countDepthMismatch()
             return nil
         }
-        let sampled = sampleRGB5Tap(pixelBuffer: pb, at: projected, width: w, height: h)
+        let sampled = sampleRGB3x3(pixelBuffer: pb, at: projected, width: w, height: h)
 
-        // Normals của ARMesh sau smooth/fill có thể đảo hướng cục bộ.
-        // Vì mục tiêu ở đây là lấy màu, dùng |ndotl| giúp không loại oan các mặt vẫn nhìn thấy.
-        let facing = abs(ndotl)
-        if worldNormal != nil, ndotl < -0.95 {
-            diag?.countBackface()
-        }
-        let angleWeight = max(0.35, min(1.0, 0.35 + 0.65 * facing))
+        // Smooth cosine-based angle weight — no hard cutoff, no abs().
+        // Maps ndotl ∈ [-1, 1] → weight ∈ [0.05, 1.0] with a linear ramp.
+        // • Head-on  (ndotl = +1) → 1.00  (best quality)
+        // • Tangential (ndotl = 0) → 0.50  (acceptable)
+        // • Backface  (ndotl = -1) → 0.05  (tiny but non-zero to avoid
+        //   black holes at mesh-normal folds created by smoothing/hole-fill)
+        if worldNormal != nil, ndotl < -0.80 { diag?.countBackface() }
+        let angleWeight = max(0.05, 0.5 * (1.0 + ndotl))
         let distanceScale: Float
         switch profile.subject {
         case .room: distanceScale = 0.65
@@ -1165,6 +1570,9 @@ enum ARMeshExporter {
         geometricDepth: Float,
         profile: ExportProfile
     ) -> Bool {
+        // Room scans: skip depth check — floors/walls/ceilings often fail
+        // depth alignment and unnecessarily become black.
+        if profile.skipDepthCheck { return true }
         let sceneDepth = frame.smoothedSceneDepth ?? frame.sceneDepth
         guard let depthMap = sceneDepth?.depthMap else { return true }
         let depthW = CVPixelBufferGetWidth(depthMap)
@@ -1189,13 +1597,23 @@ enum ARMeshExporter {
         return sampledDepth + tolerance >= geometricDepth
     }
 
-    private static func sampleRGB5Tap(pixelBuffer: CVPixelBuffer, at projected: CGPoint, width: Int, height: Int) -> SIMD3<Float> {
-        let offsets: [(CGFloat, CGFloat)] = [(0, 0), (-1.2, 0), (1.2, 0), (0, -1.2), (0, 1.2)]
+    /// 3×3 Gaussian kernel (9 taps, pre-normalised weights sum to 1.0).
+    /// More accurate than the old 5-tap uniform average: corners contribute less,
+    /// centre dominates → sharper result with better noise suppression.
+    private static func sampleRGB3x3(pixelBuffer: CVPixelBuffer, at p: CGPoint, width: Int, height: Int) -> SIMD3<Float> {
+        // (dx, dy, weight)  — Gaussian weights: centre=0.25, edge=0.125, corner=0.0625
+        let taps: [(CGFloat, CGFloat, Float)] = [
+            (-1, -1, 0.0625), (0, -1, 0.125), (1, -1, 0.0625),
+            (-1,  0, 0.125),  (0,  0, 0.25),  (1,  0, 0.125),
+            (-1,  1, 0.0625), (0,  1, 0.125), (1,  1, 0.0625)
+        ]
         var acc = SIMD3<Float>(0, 0, 0)
-        for (dx, dy) in offsets {
-            acc += sampleRGBAtImage(pixelBuffer: pixelBuffer, x: projected.x + dx, y: projected.y + dy, width: width, height: height)
+        for (dx, dy, w) in taps {
+            acc += sampleRGBAtImage(pixelBuffer: pixelBuffer,
+                                    x: p.x + dx, y: p.y + dy,
+                                    width: width, height: height) * w
         }
-        return simd_clamp(acc / Float(offsets.count), SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        return simd_clamp(acc, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
     }
 
     private static func imageBorderWeight(point: CGPoint, width: Int, height: Int) -> Float {
@@ -1226,11 +1644,19 @@ enum ARMeshExporter {
         worldPosition: SIMD3<Float>,
         normal: SIMD3<Float>,
         frames: [ARFrame],
-        profile: ExportProfile
+        profile: ExportProfile,
+        diag: TextureDiag? = nil
     ) -> TextureProjection? {
         var best: TextureProjection?
         for (idx, frame) in frames.enumerated() {
-            guard let pt = textureCoordinatePoint(worldPosition: worldPosition, normal: normal, frame: frame, profile: profile) else { continue }
+            guard let pt = textureCoordinatePoint(
+                worldPosition: worldPosition,
+                normal: normal,
+                frame: frame,
+                profile: profile,
+                allowRelaxedFallback: false,
+                diag: diag
+            ) else { continue }
             let camPos = cameraPosition(frame: frame)
             let depth = simd_distance(camPos, worldPosition)
             let img = frame.capturedImage
@@ -1240,7 +1666,32 @@ enum ARMeshExporter {
             let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
             let score = border * center * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.01
             if best == nil || score > best!.score {
-                best = TextureProjection(frameIndex: idx, point: pt, score: score)
+                best = TextureProjection(frameIndex: idx, point: pt, score: score, isRelaxed: false)
+            }
+        }
+        if best != nil {
+            return best
+        }
+
+        for (idx, frame) in frames.enumerated() {
+            guard let pt = textureCoordinatePoint(
+                worldPosition: worldPosition,
+                normal: normal,
+                frame: frame,
+                profile: profile,
+                allowRelaxedFallback: true,
+                diag: nil
+            ) else { continue }
+            let camPos = cameraPosition(frame: frame)
+            let depth = simd_distance(camPos, worldPosition)
+            let img = frame.capturedImage
+            let w = CVPixelBufferGetWidth(img)
+            let h = CVPixelBufferGetHeight(img)
+            let border = imageBorderWeight(point: pt, width: w, height: h)
+            let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
+            let score = 0.55 * border * center * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.005
+            if best == nil || score > best!.score {
+                best = TextureProjection(frameIndex: idx, point: pt, score: score, isRelaxed: true)
             }
         }
         return best
@@ -1261,15 +1712,40 @@ enum ARMeshExporter {
         worldPosition: SIMD3<Float>,
         normal: SIMD3<Float>,
         frame: ARFrame,
-        profile: ExportProfile
+        profile: ExportProfile,
+        allowRelaxedFallback: Bool = false,
+        diag: TextureDiag? = nil
     ) -> CGPoint? {
-        guard let pt = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame) else { return nil }
+        let projected: CGPoint?
+        if let point = projectWorldToImagePixel(worldPosition: worldPosition, frame: frame) {
+            projected = point
+        } else {
+            let nn = simd_normalize(normal)
+            let offsets: [Float] = allowRelaxedFallback ? [0.003, 0.006, 0.012, 0.020] : [0.003, 0.006, 0.012]
+            var rescued: CGPoint?
+            for offset in offsets {
+                if let point = projectWorldToImagePixel(worldPosition: worldPosition + nn * offset, frame: frame) {
+                    rescued = point
+                    break
+                }
+                if let point = projectWorldToImagePixel(worldPosition: worldPosition - nn * offset, frame: frame) {
+                    rescued = point
+                    break
+                }
+            }
+            projected = rescued
+        }
+        guard let pt = projected else {
+            diag?.countOutOfBounds()
+            return nil
+        }
         let img = frame.capturedImage
         let w = CVPixelBufferGetWidth(img)
         let h = CVPixelBufferGetHeight(img)
         let camPos = cameraPosition(frame: frame)
         let depth = simd_distance(camPos, worldPosition)
-        guard passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else {
+        guard allowRelaxedFallback || passesDepthConsistency(frame: frame, projected: pt, imageWidth: w, imageHeight: h, geometricDepth: depth, profile: profile) else {
+            diag?.countDepthMismatch()
             return nil
         }
         let ndotl = abs(simd_dot(simd_normalize(normal), simd_normalize(camPos - worldPosition)))
@@ -1279,29 +1755,48 @@ enum ARMeshExporter {
         case .nearbyObject: minFacing = 0.02
         case .ultraDetailObject: minFacing = 0.04
         }
-        guard ndotl >= minFacing else { return nil }
+        let facingThreshold = allowRelaxedFallback ? minFacing * 0.4 : minFacing
+        guard ndotl >= facingThreshold else {
+            diag?.countFacingRejected()
+            return nil
+        }
         return pt
     }
 
+    /// Sigmoid S-curve: maps [0,1]→[0,1] preserving 0.0 and 1.0 as fixed points.
+    /// strength > 1  →  steeper S (more contrast pop).
+    /// strength = 1  →  linear pass-through.
+    @inline(__always)
+    private static func sCurveContrast(_ x: Float, strength: Float) -> Float {
+        let v = (x - 0.5) * strength
+        return simd_clamp(0.5 + v / (1.0 + abs(v)), 0.0, 1.0)
+    }
+
     private static func enhanceSampledColor(_ color: SIMD3<Float>, profile: ExportProfile) -> SIMD3<Float> {
-        // 1. Saturation boost
-        let luminance = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
-        let gray = SIMD3<Float>(repeating: luminance)
-        let boostedSat = gray + (color - gray) * profile.saturationBoost
+        // 1. Saturation — simple linear boost around luma, preserving luminance.
+        //    No vibrance/vibrancy: it over-pushes near-grey surfaces (walls, ceiling)
+        //    into artificially coloured results that don't match reality.
+        let luma = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
+        let gray = SIMD3<Float>(repeating: luma)
+        let saturated = simd_clamp(gray + (color - gray) * profile.saturationBoost,
+                                   SIMD3<Float>(0), SIMD3<Float>(1))
 
-        // 2. Contrast boost
-        let boostedContrast = (boostedSat - SIMD3<Float>(repeating: 0.5)) * profile.contrastBoost + SIMD3<Float>(repeating: 0.5)
-        let clamped = simd_clamp(boostedContrast, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        // 2. Gentle S-curve contrast — mild, just to add a touch of pop.
+        let s = profile.contrastBoost
+        let curved = SIMD3<Float>(
+            sCurveContrast(saturated.x, strength: s),
+            sCurveContrast(saturated.y, strength: s),
+            sCurveContrast(saturated.z, strength: s)
+        )
 
-        // 3. Gamma correction — gamma < 1 lifts dark mid-tones so dimly-lit
-        //    surfaces don't appear black in the viewer.
+        // 3. Gamma — stay close to 1.0 so light-coloured surfaces stay accurate.
         let gamma = profile.gammaCorrection
         let corrected = SIMD3<Float>(
-            pow(clamped.x, gamma),
-            pow(clamped.y, gamma),
-            pow(clamped.z, gamma)
+            pow(curved.x, gamma),
+            pow(curved.y, gamma),
+            pow(curved.z, gamma)
         )
-        return simd_clamp(corrected, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        return simd_clamp(corrected, SIMD3<Float>(0), SIMD3<Float>(1))
     }
 
     private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
@@ -1456,7 +1951,7 @@ enum ARMeshExporter {
 
         guard let yBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0)?.assumingMemoryBound(to: UInt8.self),
               let uvBase = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 1)?.assumingMemoryBound(to: UInt8.self) else {
-            return SIMD3<Float>(repeating: 0.55)
+            return SIMD3<Float>(repeating: 0.45)
         }
 
         let yRow = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
@@ -1498,7 +1993,7 @@ enum ARMeshExporter {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
         defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
         guard let base = CVPixelBufferGetBaseAddress(pixelBuffer)?.assumingMemoryBound(to: UInt8.self) else {
-            return SIMD3<Float>(repeating: 0.55)
+            return SIMD3<Float>(repeating: 0.45)
         }
         let rowBytes = CVPixelBufferGetBytesPerRow(pixelBuffer)
 
@@ -1540,4 +2035,4 @@ enum ARMeshExporter {
         )
         return SIMD3<Float>(Float(bitmap[0]), Float(bitmap[1]), Float(bitmap[2])) / 255
     }
-}
+}   

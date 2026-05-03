@@ -1,15 +1,47 @@
 /*
  Abstract:
- Product-oriented room scan workflow:
- 1. Room Base
- 2. Detail Patch capture
- 3. Fusion Export
- */
+ Polycam-style 3D scan UI.
+   • Area mode  → room-scale mesh
+   • Object mode → focused object scan (Standard / Ultra Detail)
+ Reference point markers can be tapped into any surface for alignment export.
+*/
 
 import SwiftUI
 import UIKit
 import RealityKit
 import ARKit
+
+// MARK: - Logging
+
+/// Centralised, prefixed log helper.  All output goes to Xcode's debug console.
+/// Filter in console: type  "[SCAN]"  "[AR]"  "[EXPORT]"  "[ERROR]"  to focus.
+private enum ScanLog {
+    static func ar(_ msg: String)     { print("[AR]     \(msg)") }
+    static func scan(_ msg: String)   { print("[SCAN]   \(msg)") }
+    static func export(_ msg: String) { print("[EXPORT] \(msg)") }
+    static func ref(_ msg: String)    { print("[REF-PT] \(msg)") }
+    static func error(_ msg: String)  { print("[ERROR]  ⚠️ \(msg)") }
+}
+
+// MARK: - Scan-mode enums
+
+private enum ScanCategory: String, CaseIterable, Identifiable {
+    case area, object
+    var id: String { rawValue }
+    var title: String { switch self { case .area: "Khu vực"; case .object: "Vật thể" } }
+    var icon: String  { switch self { case .area: "house.fill"; case .object: "cube.fill" } }
+}
+
+private enum ObjectDetailMode: String, CaseIterable, Identifiable {
+    case standard, ultra
+    var id: String { rawValue }
+    var title: String { switch self { case .standard: "Chuẩn"; case .ultra: "Siêu chi tiết" } }
+    var exportSubject: ARMeshExporter.ExportSubject {
+        switch self { case .standard: .nearbyObject; case .ultra: .ultraDetailObject }
+    }
+}
+
+// MARK: - AR UIViewRepresentable
 
 struct LiDARMeshScanView: UIViewRepresentable {
 
@@ -23,15 +55,17 @@ struct LiDARMeshScanView: UIViewRepresentable {
     @Binding var exportSubject: ARMeshExporter.ExportSubject
     @Binding var detailPatches: [ARMeshExporter.DetailPatch]
     @Binding var prefersPatchCapture: Bool
+    @Binding var autoFrozenCount: Int
+    @Binding var isMarkingReferencePoints: Bool
 
+    var onReferenceTapped: (SIMD3<Float>) -> Void
     var prepareForAR: () -> Void
     var isTabActive: Bool
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator(parent: self)
-    }
+    func makeCoordinator() -> Coordinator { Coordinator(parent: self) }
 
     func makeUIView(context: Context) -> ARView {
+        ScanLog.ar("makeUIView — bắt đầu khởi tạo ARView")
         prepareForAR()
 
         let arView = ARView(frame: .zero, cameraMode: .ar, automaticallyConfigureSession: false)
@@ -41,51 +75,63 @@ struct LiDARMeshScanView: UIViewRepresentable {
         let config = ARWorldTrackingConfiguration()
         let supportsMesh = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
         isMeshSupported = supportsMesh
+        ScanLog.ar("LiDAR mesh hỗ trợ: \(supportsMesh)")
 
-        if supportsMesh {
-            config.sceneReconstruction = .mesh
-        }
+        if supportsMesh { config.sceneReconstruction = .mesh }
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
             config.frameSemantics.insert(.smoothedSceneDepth)
+            ScanLog.ar("frameSemantics: smoothedSceneDepth")
         } else if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
+            ScanLog.ar("frameSemantics: sceneDepth")
+        } else {
+            ScanLog.ar("frameSemantics: không hỗ trợ depth")
         }
         context.coordinator.trackingConfiguration = config
-
         arView.environment.lighting.intensityExponent = 1
-        if supportsMesh {
-            arView.debugOptions.insert(.showSceneUnderstanding)
-        }
+        if supportsMesh { arView.debugOptions.insert(.showSceneUnderstanding) }
+
+        let tap = UITapGestureRecognizer(target: context.coordinator,
+                                         action: #selector(Coordinator.handleTap(_:)))
+        tap.cancelsTouchesInView = false
+        arView.addGestureRecognizer(tap)
 
         DispatchQueue.main.async {
             arViewRef = arView
+            ScanLog.ar("arViewRef đã được gán ✓")
         }
 
         if isTabActive {
             arView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
             context.coordinator.didRunInitialSession = true
+            ScanLog.ar("Session run (initial) — isTabActive=true")
+        } else {
+            ScanLog.ar("makeUIView — tab không active, chờ updateUIView")
         }
-
         return arView
     }
 
     func updateUIView(_ uiView: ARView, context: Context) {
         context.coordinator.parent = self
         guard let config = context.coordinator.trackingConfiguration else { return }
-
         if isTabActive {
             if context.coordinator.pausedForTabSwitch {
                 uiView.session.run(config, options: [])
                 context.coordinator.pausedForTabSwitch = false
+                ScanLog.ar("Session resumed sau tab switch")
             } else if !context.coordinator.didRunInitialSession {
                 uiView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
                 context.coordinator.didRunInitialSession = true
+                ScanLog.ar("Session run (lazy initial)")
             }
         } else if context.coordinator.didRunInitialSession, !context.coordinator.pausedForTabSwitch {
             uiView.session.pause()
             context.coordinator.pausedForTabSwitch = true
+            ScanLog.ar("Session paused — tab không active")
         }
     }
+
+    // MARK: Coordinator
 
     final class Coordinator: NSObject, ARSessionDelegate {
         var parent: LiDARMeshScanView
@@ -103,59 +149,262 @@ struct LiDARMeshScanView: UIViewRepresentable {
         private var lastSpeedTimestamp: TimeInterval?
         private var lastSpeedCamPos: SIMD3<Float>?
 
-        init(parent: LiDARMeshScanView) {
-            self.parent = parent
+        // ── Auto-freeze ──────────────────────────────────────────────────
+        private let autoFreezeDelay: TimeInterval = 3.0
+        private var anchorLastChangeTime: [UUID: TimeInterval] = [:]
+        private var anchorVertexCounts: [UUID: Int] = [:]
+        private var localFrozenAnchorIDs: Set<UUID> = []
+
+        // ── Voxel tracking ───────────────────────────────────────────────
+        private enum RegionState { case scanning, almostComplete, complete }
+        private let voxelSize: Float = 0.25
+        private let voxelObsThreshold = 8
+        private struct VoxelKey: Hashable { let x, y, z: Int }
+        private struct VoxelCell {
+            var observationCount: Int = 0
+            var lastObservedTime: TimeInterval = 0
+            var state: RegionState = .scanning
+        }
+        private var voxelGrid: [VoxelKey: VoxelCell] = [:]
+        private var activeVoxelBoxes: Set<VoxelKey> = []
+        private let maxActiveBoxes = 20
+        private var voxelUpdateCounter = 0
+        private let voxelUpdateInterval = 10
+
+        static let frozenVisualName = "frozen_visual"
+
+        func clearLocalFrozenIDs() {
+            localFrozenAnchorIDs.removeAll()
+            anchorLastChangeTime.removeAll()
+            anchorVertexCounts.removeAll()
+            voxelGrid.removeAll()
+            activeVoxelBoxes.removeAll()
+            voxelUpdateCounter = 0
         }
 
-        func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
-            mergeMeshAnchors(from: anchors)
+        // MARK: ARSession lifecycle logs
+
+        func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+            let state: String
+            switch camera.trackingState {
+            case .notAvailable:
+                state = "notAvailable"
+            case .limited(let reason):
+                switch reason {
+                case .initializing:      state = "limited(initializing)"
+                case .excessiveMotion:   state = "limited(excessiveMotion)"
+                case .insufficientFeatures: state = "limited(insufficientFeatures)"
+                case .relocalizing:      state = "limited(relocalizing)"
+                @unknown default:        state = "limited(unknown)"
+                }
+            case .normal:
+                state = "normal ✓"
+            @unknown default:
+                state = "unknown"
+            }
+            ScanLog.ar("Tracking state: \(state)")
         }
 
-        func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
-            mergeMeshAnchors(from: anchors)
+        func session(_ session: ARSession, didFailWithError error: Error) {
+            ScanLog.error("ARSession didFailWithError: \(error.localizedDescription)")
+            if let arError = error as? ARError {
+                ScanLog.error("  ARError code: \(arError.code.rawValue) — \(arError.localizedDescription)")
+            }
         }
 
+        func sessionWasInterrupted(_ session: ARSession) {
+            ScanLog.ar("Session bị ngắt (sessionWasInterrupted)")
+        }
+
+        func sessionInterruptionEnded(_ session: ARSession) {
+            ScanLog.ar("Session ngắt kết thúc (sessionInterruptionEnded)")
+        }
+
+        // MARK: Reference-point tap
+
+        @objc func handleTap(_ recognizer: UITapGestureRecognizer) {
+            guard parent.isMarkingReferencePoints else { return }
+            guard let av = arView else { return }
+            let location = recognizer.location(in: av)
+            let results = av.raycast(from: location, allowing: .estimatedPlane, alignment: .any)
+            let worldPos: SIMD3<Float>
+            if let hit = results.first {
+                let c = hit.worldTransform.columns.3
+                worldPos = SIMD3<Float>(c.x, c.y, c.z)
+            } else if let frame = av.session.currentFrame {
+                let t = frame.camera.transform
+                let p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+                let f = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
+                worldPos = p + simd_normalize(f) * 0.5
+            } else { return }
+            DispatchQueue.main.async { self.parent.onReferenceTapped(worldPos) }
+        }
+
+        // MARK: Bounding-box visualization
+
+        private func voxelKey(_ pos: SIMD3<Float>) -> VoxelKey {
+            VoxelKey(x: Int(floor(pos.x / voxelSize)),
+                     y: Int(floor(pos.y / voxelSize)),
+                     z: Int(floor(pos.z / voxelSize)))
+        }
+
+        private func voxelEntityName(_ key: VoxelKey) -> String {
+            "\(Coordinator.frozenVisualName)_v_\(key.x)_\(key.y)_\(key.z)"
+        }
+
+        private func showVoxelBox(key: VoxelKey, in arView: ARView) {
+            let lo = SIMD3<Float>(Float(key.x), Float(key.y), Float(key.z)) * voxelSize
+            buildAndAddBox(lo: lo, hi: lo + SIMD3<Float>(repeating: voxelSize),
+                           transform: matrix_identity_float4x4,
+                           name: voxelEntityName(key), in: arView)
+        }
+
+        private func fadeVoxelBox(key: VoxelKey, in arView: ARView) {
+            let targetName = voxelEntityName(key)
+            let steps = 6; let dt: Double = 0.05
+            DispatchQueue.main.async { [weak arView] in
+                guard let arView,
+                      let entity = arView.scene.anchors.first(where: { $0.name == targetName })
+                else { return }
+                for step in 1...steps {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + dt * Double(step)) { [weak entity, weak arView] in
+                        guard let entity else { return }
+                        let alpha = CGFloat(1.0 - Double(step) / Double(steps))
+                        entity.children.forEach {
+                            if let m = $0 as? ModelEntity {
+                                var mat = UnlitMaterial()
+                                mat.color = .init(tint: UIColor(white: 1.0, alpha: alpha))
+                                m.model?.materials = [mat]
+                            }
+                        }
+                        if step == steps { arView?.scene.removeAnchor(entity) }
+                    }
+                }
+            }
+        }
+
+        private func sampleAnchorIntoVoxels(mesh: ARMeshAnchor, at time: TimeInterval) {
+            let src = mesh.geometry.vertices
+            guard src.count > 0 else { return }
+            let base = src.buffer.contents() + src.offset
+            let step = max(1, src.count / 25)
+            for i in stride(from: 0, to: src.count, by: step) {
+                let local = (base + i * src.stride).assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                let w = mesh.transform * SIMD4<Float>(local.x, local.y, local.z, 1)
+                let key = voxelKey(SIMD3<Float>(w.x, w.y, w.z))
+                var cell = voxelGrid[key] ?? VoxelCell()
+                guard cell.state != .complete else { continue }
+                cell.observationCount += 1
+                cell.lastObservedTime  = time
+                voxelGrid[key] = cell
+            }
+        }
+
+        private func checkVoxelTransitions(at now: TimeInterval) {
+            guard let av = arView else { return }
+            var completedCount = 0
+            for key in voxelGrid.keys {
+                guard var cell = voxelGrid[key] else { continue }
+                guard cell.state != .complete else { completedCount += 1; continue }
+                let elapsed = now - cell.lastObservedTime
+                switch cell.state {
+                case .scanning where cell.observationCount >= voxelObsThreshold:
+                    cell.state = .almostComplete
+                    voxelGrid[key] = cell
+                    if !activeVoxelBoxes.contains(key), activeVoxelBoxes.count < maxActiveBoxes {
+                        activeVoxelBoxes.insert(key)
+                        showVoxelBox(key: key, in: av)
+                    }
+                case .almostComplete where elapsed >= autoFreezeDelay:
+                    cell.state = .complete
+                    voxelGrid[key] = cell
+                    if activeVoxelBoxes.remove(key) != nil { fadeVoxelBox(key: key, in: av) }
+                    completedCount += 1
+                default: break
+                }
+            }
+            let total = completedCount
+            DispatchQueue.main.async { self.parent.autoFrozenCount = total }
+        }
+
+        func addFrozenVisualization(for anchor: ARMeshAnchor, in arView: ARView) {
+            let src = anchor.geometry.vertices
+            guard src.count > 0 else { return }
+            let base = src.buffer.contents() + src.offset
+            var lo = SIMD3<Float>(repeating:  Float.greatestFiniteMagnitude)
+            var hi = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+            for i in 0..<src.count {
+                let v = (base + i * src.stride).assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                lo = simd_min(lo, v); hi = simd_max(hi, v)
+            }
+            buildAndAddBox(lo: lo, hi: hi, transform: anchor.transform,
+                           name: Self.frozenVisualName, in: arView)
+        }
+
+        private func buildAndAddBox(lo: SIMD3<Float>, hi: SIMD3<Float>,
+                                    transform: float4x4, name: String, in arView: ARView) {
+            let lx = hi.x - lo.x, ly = hi.y - lo.y, lz = hi.z - lo.z
+            guard lx > 0.01, ly > 0.01, lz > 0.01 else { return }
+            let t  = max(0.005, min(0.014, min(lx, min(ly, lz)) * 0.018))
+            let cx = (lo.x + hi.x) * 0.5
+            let cy = (lo.y + hi.y) * 0.5
+            let cz = (lo.z + hi.z) * 0.5
+            DispatchQueue.main.async { [weak arView] in
+                guard let arView else { return }
+                if let old = arView.scene.anchors.first(where: { $0.name == name }) {
+                    arView.scene.removeAnchor(old)
+                }
+                var mat = UnlitMaterial()
+                mat.color = .init(tint: UIColor(white: 1.0, alpha: 1.0))
+                let root = AnchorEntity(world: transform)
+                root.name = name
+                func bar(_ pos: SIMD3<Float>, _ size: SIMD3<Float>) {
+                    let e = ModelEntity(mesh: MeshResource.generateBox(size: size), materials: [mat])
+                    e.position = pos; root.addChild(e)
+                }
+                bar(SIMD3(cx, lo.y, lo.z), SIMD3(lx, t, t)); bar(SIMD3(cx, hi.y, lo.z), SIMD3(lx, t, t))
+                bar(SIMD3(cx, lo.y, hi.z), SIMD3(lx, t, t)); bar(SIMD3(cx, hi.y, hi.z), SIMD3(lx, t, t))
+                bar(SIMD3(lo.x, cy, lo.z), SIMD3(t, ly, t)); bar(SIMD3(hi.x, cy, lo.z), SIMD3(t, ly, t))
+                bar(SIMD3(lo.x, cy, hi.z), SIMD3(t, ly, t)); bar(SIMD3(hi.x, cy, hi.z), SIMD3(t, ly, t))
+                bar(SIMD3(lo.x, lo.y, cz), SIMD3(t, t, lz)); bar(SIMD3(hi.x, lo.y, cz), SIMD3(t, t, lz))
+                bar(SIMD3(lo.x, hi.y, cz), SIMD3(t, t, lz)); bar(SIMD3(hi.x, hi.y, cz), SIMD3(t, t, lz))
+                arView.scene.addAnchor(root)
+            }
+        }
+
+        // MARK: init
+
+        init(parent: LiDARMeshScanView) { self.parent = parent }
+
+        // MARK: ARSessionDelegate
+
+        func session(_ session: ARSession, didAdd anchors: [ARAnchor]) { mergeMeshAnchors(from: anchors) }
+        func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) { mergeMeshAnchors(from: anchors) }
         func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
             var changed = false
-            for anchor in anchors where meshAnchorsByID.removeValue(forKey: anchor.identifier) != nil {
-                changed = true
-            }
-            if changed {
-                recomputeAndPublishStats()
-            }
+            for anchor in anchors where meshAnchorsByID.removeValue(forKey: anchor.identifier) != nil { changed = true }
+            if changed { recomputeAndPublishStats() }
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            let camPos = SIMD3<Float>(
-                frame.camera.transform.columns.3.x,
-                frame.camera.transform.columns.3.y,
-                frame.camera.transform.columns.3.z
-            )
-
+            let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
+                                     frame.camera.transform.columns.3.y,
+                                     frame.camera.transform.columns.3.z)
             let recordDistanceThreshold: Float
             switch parent.exportSubject {
-            case .room: recordDistanceThreshold = 0.03
-            case .nearbyObject: recordDistanceThreshold = 0.008
-            case .ultraDetailObject: recordDistanceThreshold = 0.004
+            case .room:             recordDistanceThreshold = 0.015
+            case .nearbyObject:     recordDistanceThreshold = 0.008
+            case .ultraDetailObject:recordDistanceThreshold = 0.004
             }
-
             if let last = lastRecordedCamPos {
                 if simd_length(camPos - last) >= recordDistanceThreshold {
-                    ARMeshExporter.recordFrameForColorFusion(
-                        frame,
-                        cameraPosition: camPos,
-                        detailPatches: parent.detailPatches,
-                        preferPatchHistory: parent.prefersPatchCapture
-                    )
+                    ARMeshExporter.recordFrameForColorFusion(frame, cameraPosition: camPos,
+                        detailPatches: parent.detailPatches, preferPatchHistory: parent.prefersPatchCapture)
                     lastRecordedCamPos = camPos
                 }
             } else {
-                ARMeshExporter.recordFrameForColorFusion(
-                    frame,
-                    cameraPosition: camPos,
-                    detailPatches: parent.detailPatches,
-                    preferPatchHistory: parent.prefersPatchCapture
-                )
+                ARMeshExporter.recordFrameForColorFusion(frame, cameraPosition: camPos,
+                    detailPatches: parent.detailPatches, preferPatchHistory: parent.prefersPatchCapture)
                 lastRecordedCamPos = camPos
             }
 
@@ -164,421 +413,625 @@ struct LiDARMeshScanView: UIViewRepresentable {
 
             var speed: Float = 0
             if let prevT = lastSpeedTimestamp, let prevP = lastSpeedCamPos {
-                let dt = max(Float(frame.timestamp - prevT), 1e-3)
-                speed = simd_length(camPos - prevP) / dt
+                speed = simd_length(camPos - prevP) / max(Float(frame.timestamp - prevT), 1e-3)
             }
             lastSpeedTimestamp = frame.timestamp
-            lastSpeedCamPos = camPos
+            lastSpeedCamPos    = camPos
 
-            let tooFast: Bool
-            let triangleTarget: Double
+            let tooFast: Bool; let triangleTarget: Double
             switch parent.exportSubject {
-            case .room:
-                tooFast = speed > 0.45
-                triangleTarget = 80_000
-            case .nearbyObject:
-                tooFast = speed > 0.18
-                triangleTarget = 45_000
-            case .ultraDetailObject:
-                tooFast = speed > 0.10
-                triangleTarget = 65_000
+            case .room:             tooFast = speed > 0.45; triangleTarget = 80_000
+            case .nearbyObject:     tooFast = speed > 0.18; triangleTarget = 45_000
+            case .ultraDetailObject:tooFast = speed > 0.10; triangleTarget = 65_000
             }
 
             let triangles = cachedTriangleCount
-            let densityProgress = min(Double(triangles) / triangleTarget, 1.0)
-            let stabilityPenalty: Double = tooFast ? 0.15 : 0
-            let finalProgress = max(0, min(1, densityProgress - stabilityPenalty))
+            let finalProgress = max(0, min(1, min(Double(triangles) / triangleTarget, 1.0) - (tooFast ? 0.15 : 0)))
 
             let stage: String
             if triangles == 0 {
                 stage = "Đang khởi động mesh..."
             } else if finalProgress < 0.25 {
                 switch parent.exportSubject {
-                case .room: stage = "Bước 1/4: Quét khung tổng thể"
-                case .nearbyObject: stage = "Bước 1/4: Tiến gần vật thể"
-                case .ultraDetailObject: stage = "Bước 1/4: Khóa vật ở giữa khung"
+                case .room:             stage = "Bước 1/4: Quét khung tổng thể"
+                case .nearbyObject:     stage = "Bước 1/4: Tiến gần vật thể"
+                case .ultraDetailObject:stage = "Bước 1/4: Khóa vật ở giữa khung"
                 }
             } else if finalProgress < 0.5 {
                 switch parent.exportSubject {
-                case .room: stage = "Bước 2/4: Bổ sung góc khuất"
-                case .nearbyObject: stage = "Bước 2/4: Quét các mép và gờ"
-                case .ultraDetailObject: stage = "Bước 2/4: Quét mép và cạnh thật chậm"
+                case .room:             stage = "Bước 2/4: Bổ sung góc khuất"
+                case .nearbyObject:     stage = "Bước 2/4: Quét các mép và gờ"
+                case .ultraDetailObject:stage = "Bước 2/4: Quét mép và cạnh thật chậm"
                 }
             } else if finalProgress < 0.8 {
                 switch parent.exportSubject {
-                case .room: stage = "Bước 3/4: Tăng chi tiết bề mặt"
-                case .nearbyObject: stage = "Bước 3/4: Giữ khoảng cách gần, quét chậm"
-                case .ultraDetailObject: stage = "Bước 3/4: Tích lũy texture sắc nét"
+                case .room:             stage = "Bước 3/4: Tăng chi tiết bề mặt"
+                case .nearbyObject:     stage = "Bước 3/4: Giữ khoảng cách gần, quét chậm"
+                case .ultraDetailObject:stage = "Bước 3/4: Tích lũy texture sắc nét"
                 }
             } else {
                 switch parent.exportSubject {
-                case .room: stage = "Bước 4/4: Gần hoàn tất - quét chậm thêm"
-                case .nearbyObject: stage = "Bước 4/4: Khóa chi tiết vật gần"
-                case .ultraDetailObject: stage = "Bước 4/4: Hoàn thiện cận cảnh"
+                case .room:             stage = "Bước 4/4: Gần hoàn tất – quét chậm thêm"
+                case .nearbyObject:     stage = "Bước 4/4: Khóa chi tiết vật gần"
+                case .ultraDetailObject:stage = "Bước 4/4: Hoàn thiện cận cảnh"
                 }
             }
 
-            let ac = cachedAnchorCount
-            let tc = cachedTriangleCount
+            let ac = cachedAnchorCount, tc = cachedTriangleCount
             DispatchQueue.main.async {
-                self.parent.meshAnchorCount = ac
-                self.parent.triangleCount = tc
-                self.parent.isMovingTooFast = tooFast
-                self.parent.scanProgress = finalProgress
-                self.parent.scanStageText = stage
+                self.parent.meshAnchorCount  = ac
+                self.parent.triangleCount    = tc
+                self.parent.isMovingTooFast  = tooFast
+                self.parent.scanProgress     = finalProgress
+                self.parent.scanStageText    = stage
             }
         }
 
         private func mergeMeshAnchors(from anchors: [ARAnchor]) {
             var changed = false
+            let now = Date().timeIntervalSinceReferenceDate
             for anchor in anchors {
                 guard let mesh = anchor as? ARMeshAnchor else { continue }
-                meshAnchorsByID[mesh.identifier] = mesh
+                let id = mesh.identifier
+                if localFrozenAnchorIDs.contains(id) { continue }
+                let currentCount = mesh.geometry.vertices.count
+                let prevCount    = anchorVertexCounts[id] ?? 0
+                let threshold    = max(2, prevCount / 200)
+                if prevCount == 0 || abs(currentCount - prevCount) > threshold {
+                    anchorVertexCounts[id]   = currentCount
+                    anchorLastChangeTime[id] = now
+                    if currentCount >= 20 { sampleAnchorIntoVoxels(mesh: mesh, at: now) }
+                }
+                meshAnchorsByID[id] = mesh
                 changed = true
             }
             if changed {
                 recomputeAndPublishStats()
+                voxelUpdateCounter += 1
+                if voxelUpdateCounter >= voxelUpdateInterval {
+                    voxelUpdateCounter = 0
+                    checkVoxelTransitions(at: now)
+                }
             }
         }
+
+        private var lastStatLogTime: TimeInterval = 0
 
         private func recomputeAndPublishStats() {
-            var total = 0
-            for mesh in meshAnchorsByID.values {
-                total += mesh.geometry.faces.count
-            }
-            cachedTriangleCount = total
-            cachedAnchorCount = meshAnchorsByID.count
+            cachedTriangleCount = meshAnchorsByID.values.reduce(0) { $0 + $1.geometry.faces.count }
+            cachedAnchorCount   = meshAnchorsByID.count
+            let ac = cachedAnchorCount, tc = cachedTriangleCount
 
-            let ac = cachedAnchorCount
-            let tc = cachedTriangleCount
+            // Throttle stat log to once per 3 seconds
+            let now = Date().timeIntervalSinceReferenceDate
+            if now - lastStatLogTime >= 3.0 {
+                lastStatLogTime = now
+                let frozen = ARMeshExporter.frozenBlockCount
+                ScanLog.scan("Mesh stats — anchors:\(ac)  triangles:\(tc)  frozenBlocks:\(frozen)  voxels:\(voxelGrid.count)")
+            }
+
             DispatchQueue.main.async {
                 self.parent.meshAnchorCount = ac
-                self.parent.triangleCount = tc
+                self.parent.triangleCount   = tc
             }
         }
     }
 }
 
-private enum CaptureWorkflowMode: String, CaseIterable, Identifiable {
-    case roomBase
-    case detailPatch
-    case fusionExport
-
-    var id: String { rawValue }
-
-    var displayName: String {
-        switch self {
-        case .roomBase: return "Room Base"
-        case .detailPatch: return "Detail Patch"
-        case .fusionExport: return "Fusion Export"
-        }
-    }
-
-    var exportSubject: ARMeshExporter.ExportSubject {
-        switch self {
-        case .roomBase: return .room
-        case .detailPatch: return .ultraDetailObject
-        case .fusionExport: return .room
-        }
-    }
-}
+// MARK: - Container (Polycam-style shell)
 
 struct LiDARMeshScanContainer: View {
 
     var isTabActive: Bool
     var prepareForAR: () -> Void
 
-    @State private var meshAnchorCount = 0
-    @State private var triangleCount = 0
-    @State private var isMeshSupported = true
-    @State private var exportMessage: String?
-    @State private var showShare = false
-    @State private var exportURLs: [URL] = []
-    @State private var isExporting = false
-    @State private var arViewRef: ARView?
-    @State private var workflowMode: CaptureWorkflowMode = .roomBase
+    // Scan mode
+    @State private var scanCategory: ScanCategory = .area
+    @State private var objectDetailMode: ObjectDetailMode = .standard
     @State private var exportSubject: ARMeshExporter.ExportSubject = .room
-    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .precise
+
+    // Settings
+    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .high
     @State private var detailPatches: [ARMeshExporter.DetailPatch] = []
+
+    // Reference points
+    @State private var referencePoints: [ARMeshExporter.ReferencePoint] = []
+    @State private var isMarkingMode = false
+
+    // Scan stats
+    @State private var meshAnchorCount = 0
+    @State private var triangleCount   = 0
+    @State private var isMeshSupported = true
     @State private var scanProgress: Double = 0
-    @State private var scanStageText: String = "Đang khởi động mesh..."
-    @State private var isMovingTooFast: Bool = false
+    @State private var scanStageText  = "Đang khởi động..."
+    @State private var isMovingTooFast = false
+    @State private var frozenBlockCount = 0
+
+    // Export / share
+    @State private var isExporting    = false
+    @State private var exportMessage: String?
+    @State private var exportURLs: [URL] = []
+    @State private var showShare      = false
+    @State private var showSettings   = false
+    @State private var arViewRef: ARView?
 
     private var hasData: Bool { triangleCount > 0 || meshAnchorCount > 0 }
 
+    // MARK: Body
+
     var body: some View {
-        ZStack(alignment: .bottom) {
+        ZStack {
             LiDARMeshScanView(
                 meshAnchorCount: $meshAnchorCount,
-                triangleCount: $triangleCount,
+                triangleCount:   $triangleCount,
                 isMeshSupported: $isMeshSupported,
-                arViewRef: $arViewRef,
-                scanProgress: $scanProgress,
-                scanStageText: $scanStageText,
+                arViewRef:       $arViewRef,
+                scanProgress:    $scanProgress,
+                scanStageText:   $scanStageText,
                 isMovingTooFast: $isMovingTooFast,
-                exportSubject: $exportSubject,
-                detailPatches: $detailPatches,
-                prefersPatchCapture: .constant(workflowMode == .detailPatch),
+                exportSubject:   $exportSubject,
+                detailPatches:   $detailPatches,
+                prefersPatchCapture: .constant(scanCategory == .object && !detailPatches.isEmpty),
+                autoFrozenCount: $frozenBlockCount,
+                isMarkingReferencePoints: $isMarkingMode,
+                onReferenceTapped: placeReferencePoint,
                 prepareForAR: prepareForAR,
                 isTabActive: isTabActive
             )
             .ignoresSafeArea()
-            .onDisappear { arViewRef = nil }
-
-            VStack(spacing: 10) {
-                if !isMeshSupported {
-                    Text("Thiết bị không hỗ trợ LiDAR mesh.")
-                        .font(.caption)
-                        .padding(8)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(10)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Anchors: \(meshAnchorCount) · Tam giác: \(triangleCount)")
-                                .font(.caption.monospacedDigit())
-                        }
-                        Spacer()
-                        Text("\(Int(scanProgress * 100))%")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    ProgressView(value: scanProgress, total: 1)
-                        .tint(isMovingTooFast ? .orange : .green)
-                    Text(scanStageText)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-                .padding(10)
-                .background(.ultraThinMaterial)
-                .cornerRadius(12)
-
-                Picker("Quy trình", selection: $workflowMode) {
-                    ForEach(CaptureWorkflowMode.allCases) { mode in
-                        Text(mode.displayName).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .onChange(of: workflowMode) { newValue in
-                    exportSubject = newValue.exportSubject
-                }
-
-                Text(workflowDescription)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-
-                if isMovingTooFast {
-                    Text(speedWarning)
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                        .padding(6)
-                        .background(.ultraThinMaterial)
-                        .cornerRadius(8)
-                }
-
-                Picker("Độ mịn", selection: $smoothingPreset) {
-                    ForEach(MeshLaplacianSmooth.QualityPreset.allCases) { preset in
-                        Text(preset.displayName).tag(preset)
-                    }
-                }
-                .pickerStyle(.segmented)
-
-                if workflowMode == .detailPatch {
-                    HStack(spacing: 8) {
-                        Button(action: markDetailPatch) {
-                            Label("Đánh dấu vùng chi tiết", systemImage: "plus.viewfinder")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-
-                        Button("Xóa tất cả") {
-                            detailPatches.removeAll()
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(detailPatches.isEmpty)
-                    }
-                }
-
-                if !detailPatches.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Vùng chi tiết đã đánh dấu: \(detailPatches.count)")
-                            .font(.caption.bold())
-                        ForEach(Array(detailPatches.enumerated()), id: \.element.id) { idx, patch in
-                            HStack {
-                                Text("\(idx + 1). \(patch.label)")
-                                    .font(.caption2)
-                                Spacer()
-                                Text("r=\(String(format: "%.2f", patch.radius))m")
-                                    .font(.caption2.monospacedDigit())
-                                Button {
-                                    detailPatches.removeAll { $0.id == patch.id }
-                                } label: {
-                                    Image(systemName: "xmark.circle.fill")
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(8)
-                    .background(.ultraThinMaterial)
-                    .cornerRadius(10)
-                }
-
-                detailGuidanceCard
-
-                Button { exportAll() } label: {
-                    if isExporting {
-                        HStack(spacing: 8) {
-                            ProgressView().tint(.white)
-                            Text("Đang xuất...").bold()
-                        }
-                        .frame(maxWidth: .infinity)
-                    } else {
-                        Label("Fusion Export: GLB + OBJ + JPG", systemImage: "square.and.arrow.up.fill")
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-                .buttonStyle(.borderedProminent)
-                .controlSize(.large)
-                .disabled(!hasData || isExporting)
-
-                if let exportMessage {
-                    Text(exportMessage)
-                        .font(.caption2)
-                        .foregroundStyle(exportMessage.hasPrefix("Lỗi") ? .red : .secondary)
-                        .multilineTextAlignment(.center)
-                }
+            // NOTE: không nil arViewRef khi sheet mở (SwiftUI có thể fire onDisappear
+            // ngay cả khi chỉ present sheet, khiến export thấy arViewRef=nil).
+            // ARView sẽ tự giải phóng khi thật sự rời tab.
+            .onDisappear {
+                ScanLog.ar("LiDARMeshScanView onDisappear — arViewRef giữ nguyên để export tiếp được")
             }
-            .padding(.horizontal, 12)
-            .padding(.bottom, 8)
+
+            VStack(spacing: 0) {
+                topBar.padding(.top, 8)
+                Spacer()
+                if isMarkingMode { markingOverlay.padding(.bottom, 20) }
+                bottomPanel
+            }
         }
         .sheet(isPresented: $showShare) {
-            if !exportURLs.isEmpty {
-                ShareSheet(items: exportURLs)
-            }
+            if !exportURLs.isEmpty { ShareSheet(items: exportURLs) }
         }
-        .onAppear {
-            exportSubject = workflowMode.exportSubject
+        .sheet(isPresented: $showSettings) { settingsSheet }
+        .onAppear { syncExportSubject() }
+    }
+
+    // MARK: Top bar
+
+    private var topBar: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                // Mode capsule selector
+                HStack(spacing: 2) {
+                    ForEach(ScanCategory.allCases) { cat in
+                        Button {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                                scanCategory = cat
+                                isMarkingMode = false
+                                syncExportSubject()
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: cat.icon).font(.caption.weight(.semibold))
+                                Text(cat.title).font(.subheadline.weight(.semibold))
+                            }
+                            .padding(.horizontal, 14).padding(.vertical, 8)
+                            .background(scanCategory == cat ? Color.accentColor : Color.clear)
+                            .foregroundStyle(scanCategory == cat ? .white : .primary)
+                            .clipShape(Capsule())
+                        }
+                    }
+                }
+                .padding(3)
+                .background(.ultraThinMaterial)
+                .clipShape(Capsule())
+
+                Spacer()
+
+                Button { showSettings = true } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.body.weight(.medium))
+                        .frame(width: 38, height: 38)
+                        .background(.ultraThinMaterial)
+                        .clipShape(Circle())
+                }
+            }
+            .padding(.horizontal, 16)
+
+            if scanCategory == .object {
+                Picker("Chi tiết", selection: $objectDetailMode) {
+                    ForEach(ObjectDetailMode.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+                .onChange(of: objectDetailMode) { _ in syncExportSubject() }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
         }
     }
 
-    private var workflowDescription: String {
-        switch workflowMode {
-        case .roomBase:
-            return "Room Base: quét toàn phòng để lấy hình khối, khoảng cách và bố cục nền."
-        case .detailPatch:
-            return "Detail Patch: chĩa giữa màn hình vào vùng quan trọng rồi bấm đánh dấu để tăng texture/chi tiết khi export."
-        case .fusionExport:
-            return "Fusion Export: giữ full phòng nhưng vá mạnh texture và màu cho các vùng đã đánh dấu."
+    // MARK: Marking crosshair overlay
+
+    private var markingOverlay: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "plus.circle")
+                .font(.system(size: 46, weight: .ultraLight))
+                .foregroundStyle(.orange)
+                .shadow(color: .black.opacity(0.5), radius: 6)
+            Text("Chạm vào bề mặt để đặt điểm chuẩn")
+                .font(.caption.weight(.medium))
+                .padding(.horizontal, 14).padding(.vertical, 6)
+                .background(Color.black.opacity(0.55))
+                .foregroundStyle(.white)
+                .clipShape(Capsule())
+        }
+        .transition(.opacity)
+    }
+
+    // MARK: Bottom panel
+
+    private var bottomPanel: some View {
+        VStack(spacing: 0) {
+            // Thin scan-progress bar pinned to top of panel
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Rectangle().fill(Color.white.opacity(0.12)).frame(height: 3)
+                    Rectangle()
+                        .fill(isMovingTooFast ? Color.orange : Color.accentColor)
+                        .frame(width: geo.size.width * CGFloat(scanProgress), height: 3)
+                        .animation(.linear(duration: 0.2), value: scanProgress)
+                }
+            }
+            .frame(height: 3)
+
+            VStack(spacing: 10) {
+                // Stage + percentage
+                HStack(alignment: .top) {
+                    Text(isMeshSupported ? scanStageText : "⚠️ Thiết bị không hỗ trợ LiDAR mesh")
+                        .font(.caption2)
+                        .foregroundStyle(isMeshSupported ? Color.gray : Color.red)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    Text("\(Int(scanProgress * 100))%")
+                        .font(.caption2.monospacedDigit().weight(.semibold))
+                }
+
+                // Metric chips
+                HStack(spacing: 8) {
+                    statChip("\(meshAnchorCount)", icon: "point.3.filled.connected.trianglepath.dotted", color: .blue)
+                    statChip("\(triangleCount)",   icon: "triangle",             color: .purple)
+                    if frozenBlockCount > 0 {
+                        statChip("\(frozenBlockCount)", icon: "snowflake",       color: .cyan)
+                    }
+                    if !referencePoints.isEmpty {
+                        statChip("\(referencePoints.count)", icon: "mappin.circle.fill", color: .orange)
+                    }
+                    Spacer()
+                }
+
+                // Speed warning
+                if isMovingTooFast {
+                    Label(speedWarning, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.orange)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+
+                // Reference-point strip
+                if !referencePoints.isEmpty {
+                    HStack(spacing: 6) {
+                        Image(systemName: "mappin.circle.fill").foregroundStyle(.orange).font(.caption)
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 5) {
+                                ForEach(referencePoints) { pt in
+                                    Text(pt.label)
+                                        .font(.caption2.weight(.medium))
+                                        .padding(.horizontal, 8).padding(.vertical, 3)
+                                        .background(Color.orange.opacity(0.18))
+                                        .foregroundStyle(.orange)
+                                        .clipShape(Capsule())
+                                }
+                            }
+                        }
+                        Button {
+                            referencePoints.removeAll()
+                            ARMeshExporter.clearReferencePoints()
+                            arViewRef?.scene.anchors
+                                .filter { $0.name.hasPrefix("ref_pt_") }
+                                .forEach { arViewRef?.scene.removeAnchor($0) }
+                        } label: {
+                            Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary).font(.caption)
+                        }
+                    }
+                }
+
+                Divider().opacity(0.35)
+
+                // Action buttons row
+                HStack(spacing: 8) {
+                    actionBtn("Chụp vùng", icon: "camera.fill", color: .green) { freezeCurrentBlock() }
+                        .disabled(!hasData)
+                    actionBtn(
+                        isMarkingMode ? "Dừng" : "Đánh dấu",
+                        icon: isMarkingMode ? "xmark.circle.fill" : "mappin.and.ellipse",
+                        color: .orange
+                    ) { withAnimation { isMarkingMode.toggle() } }
+                    if frozenBlockCount > 0 {
+                        actionBtn("Xóa hết", icon: "trash.fill", color: .red) { clearAll() }
+                    }
+                }
+
+                // Export button
+                Button(action: exportAll) {
+                    Group {
+                        if isExporting {
+                            HStack(spacing: 8) { ProgressView().tint(.white); Text("Đang xuất...").font(.body.weight(.bold)) }
+                        } else {
+                            let jsonNote = referencePoints.isEmpty ? "" : " + \(referencePoints.count) điểm JSON"
+                            Label("Export GLB + OBJ\(jsonNote)", systemImage: "square.and.arrow.up.fill").font(.body.weight(.bold))
+                        }
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(hasData && !isExporting ? Color.accentColor : Color.secondary.opacity(0.25))
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                .disabled(!hasData || isExporting)
+
+                if let msg = exportMessage {
+                    Text(msg)
+                        .font(.caption2)
+                        .foregroundStyle(msg.hasPrefix("Lỗi") ? Color.red : Color.gray)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 12)
+        }
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .shadow(color: .black.opacity(0.2), radius: 18, x: 0, y: -4)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+    }
+
+    // MARK: Settings sheet
+
+    @ViewBuilder
+    private var settingsSheet: some View {
+        NavigationView {
+            Form {
+                Section("Làm mịn mesh") {
+                    Picker("Chất lượng", selection: $smoothingPreset) {
+                        ForEach(MeshLaplacianSmooth.QualityPreset.allCases) { Text($0.displayName).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("High: mịn nhất. Medium: cân bằng. Low: nhanh.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+
+                Section("Vùng chi tiết (Detail Patches)") {
+                    if detailPatches.isEmpty {
+                        Text("Chưa có vùng nào. Bấm nút bên dưới khi chĩa tâm màn hình vào vùng cần tăng chi tiết.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(detailPatches.enumerated()), id: \.element.id) { idx, p in
+                            HStack {
+                                Text("\(idx + 1). \(p.label)")
+                                Spacer()
+                                Text("r=\(String(format: "%.2f", p.radius))m")
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                        }
+                        .onDelete { detailPatches.remove(atOffsets: $0) }
+                        Button("Xóa tất cả vùng chi tiết", role: .destructive) { detailPatches.removeAll() }
+                    }
+                    Button { addDetailPatch() } label: {
+                        Label("Đánh dấu vùng tâm màn hình", systemImage: "plus.viewfinder")
+                    }
+                }
+            }
+            .navigationTitle("Cài đặt quét")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Xong") { showSettings = false } }
+            }
+        }
+    }
+
+    // MARK: View helpers
+
+    @ViewBuilder
+    private func statChip(_ value: String, icon: String, color: Color) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon).font(.caption2).foregroundStyle(color)
+            Text(value).font(.caption2.monospacedDigit())
+        }
+    }
+
+    @ViewBuilder
+    private func actionBtn(_ title: String, icon: String, color: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: icon).font(.title3)
+                Text(title).font(.caption2.weight(.medium))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
+            .background(color.opacity(0.12))
+            .foregroundStyle(color)
+            .clipShape(RoundedRectangle(cornerRadius: 10))
         }
     }
 
     private var speedWarning: String {
         switch exportSubject {
-        case .room:
-            return "Di chuyển hơi nhanh - quét chậm để giữ màu và hình khối tốt hơn."
-        case .nearbyObject:
-            return "Quét vật gần cần di chuyển rất chậm để giữ đúng mép, chiều sâu và màu."
-        case .ultraDetailObject:
-            return "Cận cảnh siêu chi tiết yêu cầu gần như đứng yên giữa các khung. Hãy quét cực chậm."
+        case .room:             "Di chuyển quá nhanh – chậm lại"
+        case .nearbyObject:     "Quét chậm hơn để giữ chi tiết"
+        case .ultraDetailObject:"Cần gần như đứng yên giữa các frame"
         }
     }
 
-    @ViewBuilder
-    private var detailGuidanceCard: some View {
-        if workflowMode != .roomBase {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(workflowMode == .detailPatch ? "Hướng dẫn đánh dấu patch" : "Hướng dẫn fusion export")
-                    .font(.caption.bold())
-                Text("1. Giữ vùng cần tăng chi tiết ở giữa khung hình.")
-                    .font(.caption2)
-                Text("2. Với patch quan trọng, giữ khoảng cách khoảng 20-45cm và quét cực chậm trong 1-2 vòng ngắn.")
-                    .font(.caption2)
-                Text("3. Ưu tiên mép, bàn phím, màn hình, mặt bàn và vật thể chính; giữ vùng đó lớn trong khung.")
-                    .font(.caption2)
-                Text("4. Export cuối sẽ giữ full phòng nhưng vá texture mạnh hơn trong các patch đã đánh dấu.")
-                    .font(.caption2)
-            }
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(8)
-            .background(.ultraThinMaterial)
-            .cornerRadius(10)
+    // MARK: Logic helpers
+
+    private func syncExportSubject() {
+        switch scanCategory {
+        case .area:   exportSubject = .room
+        case .object: exportSubject = objectDetailMode.exportSubject
         }
     }
 
-    private func markDetailPatch() {
+    private func placeReferencePoint(_ position: SIMD3<Float>) {
+        let index = referencePoints.count + 1
+        let pt = ARMeshExporter.ReferencePoint(worldPosition: position, label: "P\(index)")
+        ARMeshExporter.addReferencePoint(pt)
+        referencePoints.append(pt)
+        ScanLog.ref("Đặt P\(index) tại world(\(String(format:"%.3f",position.x)), \(String(format:"%.3f",position.y)), \(String(format:"%.3f",position.z)))")
+
+        // Orange sphere marker in AR
+        if let view = arViewRef {
+            let sphere = ModelEntity(mesh: MeshResource.generateSphere(radius: 0.015),
+                                     materials: [{ var m = UnlitMaterial(); m.color = .init(tint: .systemOrange); return m }()])
+            var t = matrix_identity_float4x4
+            t.columns.3 = SIMD4<Float>(position.x, position.y, position.z, 1)
+            let anchor = AnchorEntity(world: t)
+            anchor.name = "ref_pt_\(index)"
+            anchor.addChild(sphere)
+            view.scene.addAnchor(anchor)
+        }
+        exportMessage = "📍 Điểm \(pt.label) đã đặt — chạm tiếp để thêm hoặc bấm Dừng khi xong."
+    }
+
+    private func freezeCurrentBlock() {
+        ScanLog.scan("freezeCurrentBlock — arViewRef=\(arViewRef != nil ? "✓" : "NIL ✗")")
         guard let view = arViewRef else {
-            exportMessage = "ARView chưa sẵn sàng để đánh dấu patch."
-            return
+            ScanLog.error("freezeCurrentBlock FAIL: arViewRef nil")
+            exportMessage = "ARSession chưa sẵn sàng."; return
         }
+        guard let frame = view.session.currentFrame else {
+            ScanLog.error("freezeCurrentBlock FAIL: currentFrame nil — session state=\(view.session.identifier)")
+            exportMessage = "ARSession chưa sẵn sàng."; return
+        }
+        let anchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        ScanLog.scan("freezeCurrentBlock — tổng anchors trong frame: \(frame.anchors.count), mesh anchors: \(anchors.count)")
+        guard !anchors.isEmpty else { exportMessage = "Chưa có mesh – hãy quét thêm."; return }
+        ARMeshExporter.freezeCurrentAnchors(anchors)
+        frozenBlockCount = ARMeshExporter.frozenBlockCount
+        ScanLog.scan("freezeCurrentBlock ✓ — frozenBlockCount=\(frozenBlockCount)")
+        if let coord = view.session.delegate as? LiDARMeshScanView.Coordinator {
+            for anchor in anchors { coord.addFrozenVisualization(for: anchor, in: view) }
+        }
+        // Compute world-space bounding box of this capture for instant dimension feedback
+        let dims = boundingBoxDimensions(of: anchors)
+        let dimText: String
+        if let d = dims {
+            let vol = d.x * d.y * d.z
+            dimText = String(format: "  %d×%d×%d cm (V≈%.1f L)",
+                             Int(d.x * 100), Int(d.y * 100), Int(d.z * 100), vol * 1000)
+        } else { dimText = "" }
+        exportMessage = "✅ Vùng \(frozenBlockCount) đã lưu.\(dimText)"
+    }
 
-        let center = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+    /// Returns the X/Y/Z extent (in metres) of the world-space bounding box of the given anchors.
+    private func boundingBoxDimensions(of anchors: [ARMeshAnchor]) -> SIMD3<Float>? {
+        var lo = SIMD3<Float>(repeating:  Float.greatestFiniteMagnitude)
+        var hi = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
+        var found = false
+        for anchor in anchors {
+            let src  = anchor.geometry.vertices
+            guard src.count > 0 else { continue }
+            let base = src.buffer.contents() + src.offset
+            for i in 0..<src.count {
+                let local = (base + i * src.stride).assumingMemoryBound(to: SIMD3<Float>.self).pointee
+                let w = anchor.transform * SIMD4<Float>(local.x, local.y, local.z, 1)
+                let wp = SIMD3<Float>(w.x, w.y, w.z)
+                lo = simd_min(lo, wp); hi = simd_max(hi, wp)
+                found = true
+            }
+        }
+        return found ? (hi - lo) : nil
+    }
+
+    private func addDetailPatch() {
+        guard let view = arViewRef else { return }
+        let center  = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         let results = view.raycast(from: center, allowing: .estimatedPlane, alignment: .any)
-
-        let patchCenter: SIMD3<Float>
-        if let first = results.first {
-            patchCenter = SIMD3<Float>(first.worldTransform.columns.3.x, first.worldTransform.columns.3.y, first.worldTransform.columns.3.z)
+        let pos: SIMD3<Float>
+        if let hit = results.first {
+            let c = hit.worldTransform.columns.3; pos = SIMD3<Float>(c.x, c.y, c.z)
         } else if let frame = view.session.currentFrame {
             let t = frame.camera.transform
-            let camPos = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
-            let forward = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
-            patchCenter = camPos + simd_normalize(forward) * 0.55
-        } else {
-            exportMessage = "Không xác định được vùng giữa khung hình để tạo patch."
-            return
-        }
+            let p = SIMD3<Float>(t.columns.3.x, t.columns.3.y, t.columns.3.z)
+            let f = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
+            pos = p + simd_normalize(f) * 0.55
+        } else { return }
+        detailPatches.append(ARMeshExporter.DetailPatch(center: pos, radius: 0.9,
+                                                        label: "Patch \(detailPatches.count + 1)"))
+    }
 
-        let index = detailPatches.count + 1
-        let patch = ARMeshExporter.DetailPatch(
-            center: patchCenter,
-            radius: workflowMode == .detailPatch ? 0.9 : 1.0,
-            label: "Patch \(index)"
-        )
-        detailPatches.append(patch)
-        exportMessage = "Đã thêm \(patch.label). Hãy quét chậm quanh vùng này để tăng chi tiết."
+    private func clearAll() {
+        let cleared = frozenBlockCount
+        ARMeshExporter.clearFrozenBlocks()
+        frozenBlockCount = 0
+        if let view = arViewRef {
+            let prefix = LiDARMeshScanView.Coordinator.frozenVisualName
+            view.scene.anchors.filter { $0.name.hasPrefix(prefix) }.forEach { view.scene.removeAnchor($0) }
+            (view.session.delegate as? LiDARMeshScanView.Coordinator)?.clearLocalFrozenIDs()
+        }
+        exportMessage = "Đã xóa \(cleared) vùng đã lưu."
     }
 
     private func exportAll() {
         exportMessage = nil
+        ScanLog.export("exportAll bắt đầu — arViewRef=\(arViewRef != nil ? "✓" : "NIL ✗")  triangles=\(triangleCount)  frozen=\(frozenBlockCount)")
+
         guard let view = arViewRef else {
-            exportMessage = "Chưa sẵn sàng camera AR."
+            ScanLog.error("exportAll FAIL: arViewRef nil — có thể do sheet/disappear đã nil ref. Thử bấm lại tab Quét 3D.")
+            exportMessage = "Camera AR chưa sẵn sàng — bấm lại tab Quét 3D rồi thử lại."
             return
         }
+
         isExporting = true
         exportMessage = "Đang xuất..."
-        let session = view.session
-        let stamp = Int(Date().timeIntervalSince1970)
-        let preset = smoothingPreset
-        let baseProfile = ARMeshExporter.ExportProfile(subject: .room)
-        let patches = detailPatches
+        let session   = view.session
+        let stamp     = Int(Date().timeIntervalSince1970)
+        let preset    = smoothingPreset
+        let profile   = ARMeshExporter.ExportProfile(subject: exportSubject)
+        let patches   = detailPatches
+        let hasRefPts = !referencePoints.isEmpty
 
+        ScanLog.export("profile=\(exportSubject.rawValue)  patches=\(patches.count)  refPts=\(referencePoints.count)  smoothing=\(preset.rawValue)")
+
+        let t0 = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             MeshLaplacianSmooth.applyPreset(preset)
             let dir = FileManager.default.temporaryDirectory
-            var urls: [URL] = []
-            var errors: [String] = []
-
+            var urls: [URL] = []; var errors: [String] = []
             do {
-                if let glbData = ARMeshExporter.buildFacetedGLB(from: session, profile: baseProfile, detailPatches: patches) {
-                    let glbURL = dir.appendingPathComponent("scan-\(stamp).glb")
-                    try glbData.write(to: glbURL, options: .atomic)
-                    urls.append(glbURL)
+                // GLB
+                ScanLog.export("Đang build GLB...")
+                let t1 = Date()
+                if let data = ARMeshExporter.buildFacetedGLB(from: session, profile: profile, detailPatches: patches) {
+                    let url = dir.appendingPathComponent("scan-\(stamp).glb")
+                    try data.write(to: url, options: .atomic)
+                    urls.append(url)
+                    ScanLog.export("GLB ✓  size=\(data.count / 1024)KB  elapsed=\(String(format:"%.1f",Date().timeIntervalSince(t1)))s")
                 } else {
                     errors.append("GLB thất bại")
+                    ScanLog.error("GLB build trả về nil")
                 }
 
+                // OBJ + MTL + texture
                 let texName = "scan-\(stamp).jpg"
+                ScanLog.export("Đang build OBJ+texture...")
+                let t2 = Date()
                 if let bundle = ARMeshExporter.buildTexturedOBJBundle(
-                    from: session,
-                    textureFilename: texName,
-                    profile: baseProfile,
-                    detailPatches: patches
-                ) {
+                    from: session, textureFilename: texName, profile: profile, detailPatches: patches) {
                     let objURL = dir.appendingPathComponent("scan-\(stamp).obj")
                     let mtlURL = dir.appendingPathComponent("scan-\(stamp).mtl")
                     let texURL = dir.appendingPathComponent(texName)
@@ -586,38 +1039,50 @@ struct LiDARMeshScanContainer: View {
                     try bundle.mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
                     try bundle.textureJPEG.write(to: texURL, options: .atomic)
                     urls.append(contentsOf: [objURL, mtlURL, texURL])
+                    ScanLog.export("OBJ ✓  obj=\(bundle.obj.utf8.count/1024)KB  jpg=\(bundle.textureJPEG.count/1024)KB  elapsed=\(String(format:"%.1f",Date().timeIntervalSince(t2)))s")
                 } else {
                     errors.append("OBJ thất bại")
+                    ScanLog.error("OBJ build trả về nil")
                 }
+
+                // Reference points JSON
+                if hasRefPts, let json = ARMeshExporter.buildReferencePointsJSON() {
+                    let jsonURL = dir.appendingPathComponent("scan-\(stamp)-markers.json")
+                    try json.write(to: jsonURL, options: .atomic)
+                    urls.append(jsonURL)
+                    ScanLog.export("markers.json ✓  \(ARMeshExporter.referencePointCount) điểm")
+                }
+
+                ScanLog.export("Export hoàn tất — \(urls.count) files  tổng=\(String(format:"%.1f",Date().timeIntervalSince(t0)))s  errors=\(errors)")
             } catch {
+                ScanLog.error("exportAll ghi file thất bại: \(error)")
                 DispatchQueue.main.async {
                     self.isExporting = false
                     self.exportMessage = "Lỗi ghi file: \(error.localizedDescription)"
                 }
                 return
             }
-
             DispatchQueue.main.async {
                 self.isExporting = false
                 if urls.isEmpty {
-                    self.exportMessage = "Chưa có mesh - tiếp tục quét thêm."
+                    self.exportMessage = "Chưa có mesh – tiếp tục quét."
                 } else {
-                    self.exportURLs = urls
-                    let note = errors.isEmpty ? "" : " (\(errors.joined(separator: ", ")))"
-                    self.exportMessage = "Đã tạo \(urls.count) file\(note) - full phòng + vá chi tiết cho \(patches.count) patch."
-                    self.showShare = true
+                    self.exportURLs    = urls
+                    let errNote        = errors.isEmpty ? "" : " (\(errors.joined(separator: ", ")))"
+                    self.exportMessage = "Xuất \(urls.count) file\(errNote)"
+                    self.showShare     = true
                 }
             }
         }
     }
 }
 
+// MARK: - Share sheet
+
 private struct ShareSheet: UIViewControllerRepresentable {
     let items: [Any]
-
     func makeUIViewController(context: Context) -> UIActivityViewController {
         UIActivityViewController(activityItems: items, applicationActivities: nil)
     }
-
-    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+    func updateUIViewController(_ uvc: UIActivityViewController, context: Context) {}
 }
