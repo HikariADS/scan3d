@@ -57,6 +57,9 @@ struct LiDARMeshScanView: UIViewRepresentable {
     @Binding var prefersPatchCapture: Bool
     @Binding var autoFrozenCount: Int
     @Binding var isMarkingReferencePoints: Bool
+    @Binding var captureHintText: String
+    /// `true` = ARKit báo hoặc cần dừng ngay — banner đỏ/cam đậm
+    @Binding var captureHintCritical: Bool
 
     var onReferenceTapped: (SIMD3<Float>) -> Void
     var prepareForAR: () -> Void
@@ -148,8 +151,17 @@ struct LiDARMeshScanView: UIViewRepresentable {
         private var lastRecordedCamPos: SIMD3<Float>?
         private var lastSpeedTimestamp: TimeInterval?
         private var lastSpeedCamPos: SIMD3<Float>?
+        /// Tốc độ tức thời — cập nhật mọi frame (khác khoảng 0.25s của UI stats).
+        private var lastMotionPos: SIMD3<Float>?
+        private var lastMotionTime: TimeInterval?
+        private var lastNegativeHapticTime: TimeInterval = 0
 
-        // ── Auto-freeze ──────────────────────────────────────────────────
+        private lazy var hapticHeavy: UIImpactFeedbackGenerator = {
+            UIImpactFeedbackGenerator(style: .heavy)
+        }()
+
+        /// (timestamp, normalized forward) — đo tốc độ quay rad/s
+        private var lastForwardSample: (TimeInterval, SIMD3<Float>)?
         private let autoFreezeDelay: TimeInterval = 3.0
         private var anchorLastChangeTime: [UUID: TimeInterval] = [:]
         private var anchorVertexCounts: [UUID: Int] = [:]
@@ -387,84 +399,276 @@ struct LiDARMeshScanView: UIViewRepresentable {
         }
 
         func session(_ session: ARSession, didUpdate frame: ARFrame) {
-            let camPos = SIMD3<Float>(frame.camera.transform.columns.3.x,
-                                     frame.camera.transform.columns.3.y,
-                                     frame.camera.transform.columns.3.z)
+            let camPos = SIMD3<Float>(
+                frame.camera.transform.columns.3.x,
+                frame.camera.transform.columns.3.y,
+                frame.camera.transform.columns.3.z
+            )
+            let col2 = frame.camera.transform.columns.2
+            let forwardUnit = simd_normalize(-SIMD3<Float>(col2.x, col2.y, col2.z))
+
+            var linearInst: Float = 0
+            if let lp = lastMotionPos, let lt = lastMotionTime {
+                linearInst = simd_length(camPos - lp) / max(Float(frame.timestamp - lt), Float(1e-4))
+            }
+            lastMotionPos = camPos
+            lastMotionTime = frame.timestamp
+
+            var angularInst: Float = 0
+            if let (prevT, prevF) = lastForwardSample {
+                let dt = Float(frame.timestamp - prevT)
+                if dt > Float(1e-4) {
+                    let dp = simd_clamp(simd_dot(prevF, forwardUnit), -1, 1)
+                    angularInst = acos(dp) / dt
+                }
+            }
+            lastForwardSample = (frame.timestamp, forwardUnit)
+
+            let subj = parent.exportSubject
+            let linMax = fusionLinearLimit(subj)
+            let angMax = fusionAngularLimit(subj)
+
+            let fusionMotionOK = linearInst <= linMax && angularInst <= angMax
+            let fusionOK = fusionMotionOK && ARMeshExporter.shouldRecordFrameForFusion(frame)
+
             let recordDistanceThreshold: Float
             switch parent.exportSubject {
-            case .room:             recordDistanceThreshold = 0.015
-            case .nearbyObject:     recordDistanceThreshold = 0.008
-            case .ultraDetailObject:recordDistanceThreshold = 0.004
+            case .room:              recordDistanceThreshold = 0.015
+            case .nearbyObject:      recordDistanceThreshold = 0.008
+            case .ultraDetailObject: recordDistanceThreshold = 0.004
             }
-            if let last = lastRecordedCamPos {
-                if simd_length(camPos - last) >= recordDistanceThreshold {
-                    ARMeshExporter.recordFrameForColorFusion(frame, cameraPosition: camPos,
-                        detailPatches: parent.detailPatches, preferPatchHistory: parent.prefersPatchCapture)
+
+            if fusionOK {
+                if let lastRec = lastRecordedCamPos {
+                    if simd_length(camPos - lastRec) >= recordDistanceThreshold {
+                        ARMeshExporter.recordFrameForColorFusion(
+                            frame, cameraPosition: camPos,
+                            detailPatches: parent.detailPatches,
+                            preferPatchHistory: parent.prefersPatchCapture
+                        )
+                        lastRecordedCamPos = camPos
+                    }
+                } else {
+                    ARMeshExporter.recordFrameForColorFusion(
+                        frame, cameraPosition: camPos,
+                        detailPatches: parent.detailPatches,
+                        preferPatchHistory: parent.prefersPatchCapture
+                    )
                     lastRecordedCamPos = camPos
                 }
-            } else {
-                ARMeshExporter.recordFrameForColorFusion(frame, cameraPosition: camPos,
-                    detailPatches: parent.detailPatches, preferPatchHistory: parent.prefersPatchCapture)
-                lastRecordedCamPos = camPos
             }
 
             guard frame.timestamp - lastUIUpdateTime >= uiUpdateInterval else { return }
             lastUIUpdateTime = frame.timestamp
 
-            var speed: Float = 0
+            var uiLinearSpeed: Float = 0
             if let prevT = lastSpeedTimestamp, let prevP = lastSpeedCamPos {
-                speed = simd_length(camPos - prevP) / max(Float(frame.timestamp - prevT), 1e-3)
+                uiLinearSpeed = simd_length(camPos - prevP) / max(Float(frame.timestamp - prevT), 1e-3)
             }
             lastSpeedTimestamp = frame.timestamp
-            lastSpeedCamPos    = camPos
+            lastSpeedCamPos = camPos
 
-            let tooFast: Bool; let triangleTarget: Double
+            let linH = linearHardThreshold(subj)
+            let angH = angularHardThreshold(subj)
+
+            let arExcessiveMotion: Bool = {
+                if case .limited(.excessiveMotion) = frame.camera.trackingState { return true }
+                return false
+            }()
+
+            let tooFastLinear = uiLinearSpeed > linH || linearInst > linH * 1.12
+            let tooFastAngular = angularInst > angH
+            let tooFast = arExcessiveMotion || tooFastLinear || tooFastAngular
+
+            let triangleTarget: Double
             switch parent.exportSubject {
-            case .room:             tooFast = speed > 0.45; triangleTarget = 80_000
-            case .nearbyObject:     tooFast = speed > 0.18; triangleTarget = 45_000
-            case .ultraDetailObject:tooFast = speed > 0.10; triangleTarget = 65_000
+            case .room:              triangleTarget = 80_000
+            case .nearbyObject:      triangleTarget = 45_000
+            case .ultraDetailObject: triangleTarget = 65_000
             }
 
             let triangles = cachedTriangleCount
-            let finalProgress = max(0, min(1, min(Double(triangles) / triangleTarget, 1.0) - (tooFast ? 0.15 : 0)))
+            let finalProgress = max(0, min(1,
+                min(Double(triangles) / triangleTarget, 1.0) - (tooFast ? 0.15 : 0)))
 
             let stage: String
             if triangles == 0 {
                 stage = "Đang khởi động mesh..."
             } else if finalProgress < 0.25 {
                 switch parent.exportSubject {
-                case .room:             stage = "Bước 1/4: Quét khung tổng thể"
-                case .nearbyObject:     stage = "Bước 1/4: Tiến gần vật thể"
-                case .ultraDetailObject:stage = "Bước 1/4: Khóa vật ở giữa khung"
+                case .room:              stage = "Bước 1/4: Quét khung tổng thể"
+                case .nearbyObject:      stage = "Bước 1/4: Tiến gần vật thể"
+                case .ultraDetailObject: stage = "Bước 1/4: Khóa vật ở giữa khung"
                 }
             } else if finalProgress < 0.5 {
                 switch parent.exportSubject {
-                case .room:             stage = "Bước 2/4: Bổ sung góc khuất"
-                case .nearbyObject:     stage = "Bước 2/4: Quét các mép và gờ"
-                case .ultraDetailObject:stage = "Bước 2/4: Quét mép và cạnh thật chậm"
+                case .room:              stage = "Bước 2/4: Bổ sung góc khuất"
+                case .nearbyObject:      stage = "Bước 2/4: Quét các mép và gờ"
+                case .ultraDetailObject: stage = "Bước 2/4: Quét mép và cạnh thật chậm"
                 }
             } else if finalProgress < 0.8 {
                 switch parent.exportSubject {
-                case .room:             stage = "Bước 3/4: Tăng chi tiết bề mặt"
-                case .nearbyObject:     stage = "Bước 3/4: Giữ khoảng cách gần, quét chậm"
-                case .ultraDetailObject:stage = "Bước 3/4: Tích lũy texture sắc nét"
+                case .room:              stage = "Bước 3/4: Tăng chi tiết bề mặt"
+                case .nearbyObject:      stage = "Bước 3/4: Giữ khoảng cách gần, quét chậm"
+                case .ultraDetailObject: stage = "Bước 3/4: Tích lũy texture sắc nét"
                 }
             } else {
                 switch parent.exportSubject {
-                case .room:             stage = "Bước 4/4: Gần hoàn tất – quét chậm thêm"
-                case .nearbyObject:     stage = "Bước 4/4: Khóa chi tiết vật gần"
-                case .ultraDetailObject:stage = "Bước 4/4: Hoàn thiện cận cảnh"
+                case .room:              stage = "Bước 4/4: Gần hoàn tất – quét chậm thêm"
+                case .nearbyObject:      stage = "Bước 4/4: Khóa chi tiết vật gần"
+                case .ultraDetailObject: stage = "Bước 4/4: Hoàn thiện cận cảnh"
                 }
             }
 
-            let ac = cachedAnchorCount, tc = cachedTriangleCount
+            let hint = captureHint(for: frame.camera.trackingState,
+                                   linearUISpeed: uiLinearSpeed,
+                                   linearInstant: linearInst,
+                                   angularRadPerSec: angularInst,
+                                   subject: subj)
+
+            let ac = cachedAnchorCount
+            let tc = cachedTriangleCount
+
             DispatchQueue.main.async {
-                self.parent.meshAnchorCount  = ac
-                self.parent.triangleCount    = tc
-                self.parent.isMovingTooFast  = tooFast
-                self.parent.scanProgress     = finalProgress
-                self.parent.scanStageText    = stage
+                self.parent.meshAnchorCount = ac
+                self.parent.triangleCount = tc
+                self.parent.isMovingTooFast = tooFast
+                self.parent.scanProgress = finalProgress
+                self.parent.scanStageText = stage
+                self.parent.captureHintText = hint.text
+                self.parent.captureHintCritical = hint.isCritical
+                if hint.shouldHapticPulse {
+                    let now = ProcessInfo.processInfo.systemUptime
+                    if now - self.lastNegativeHapticTime >= 1.3 {
+                        self.lastNegativeHapticTime = now
+                        self.hapticHeavy.prepare()
+                        self.hapticHeavy.impactOccurred()
+                    }
+                }
             }
+
+            if !fusionMotionOK || !ARMeshExporter.shouldRecordFrameForFusion(frame) {
+                throttleFusionSkipLog {
+                    ScanLog.scan(
+                        "[fusion skip] lin \(String(format: "%.3f", linearInst))/max \(linMax)" +
+                            " ang \(String(format: "%.3f", angularInst))/max \(angMax) " +
+                            " tracking=\(frame.camera.trackingState)"
+                    )
+                }
+            }
+        }
+
+        /// Tránh spam console (~60 FPS).
+        private var lastFusionSkipLogWall: TimeInterval = 0
+        private func throttleFusionSkipLog(_ block: () -> Void) {
+            let t = ProcessInfo.processInfo.systemUptime
+            guard t - lastFusionSkipLogWall >= 1.8 else { return }
+            lastFusionSkipLogWall = t
+            block()
+        }
+
+        private struct CaptureHintOutcome {
+            var text = ""
+            var isCritical = false
+            var shouldHapticPulse = false
+        }
+
+        private func captureHint(
+            for tracking: ARCamera.TrackingState,
+            linearUISpeed: Float,
+            linearInstant: Float,
+            angularRadPerSec: Float,
+            subject: ARMeshExporter.ExportSubject
+        ) -> CaptureHintOutcome {
+            var out = CaptureHintOutcome()
+            let linH = linearHardThreshold(subject)
+            let angH = angularHardThreshold(subject)
+            let linS = linH * 0.55
+            let angS = angH * 0.62
+            let tip: String = {
+                subject == .room
+                    ? " Quét cực chậm như chỉnh film — mục tiêu ~\(Int(linH * 100)) cm/s max."
+                    : (" Quét rất chậm — " + (subject == .ultraDetailObject ? "đứng yên một nhịp" : "từng bước nhỏ") + ".")
+            }()
+
+            switch tracking {
+            case .notAvailable:
+                out.text = "Tracking AR không ổn định. Thêm vật thể vào khung, tránh tường trắng trơn không viền."
+                out.isCritical = true
+                out.shouldHapticPulse = true
+                return out
+            case .limited(let r):
+                switch r {
+                case .excessiveMotion:
+                    out.text = "Chuyển động quá mạnh — ARKit dừng ghi chi tiết. Đứng yên ~1 giây, quét cực chậm để tránh ghosting và mờ texture."
+                    out.isCritical = true
+                    out.shouldHapticPulse = true
+                    return out
+                case .relocalizing:
+                    out.text = "Đang tái ghép không gian — giữ trong cùng một phòng, quét chậm, không chạy nhanh qua chỗ khác."
+                    out.isCritical = true
+                    return out
+                case .initializing:
+                    out.text = "Tracking khởi tạo — di chuyển điện thoại từ từ, quét các góc phòng trong vài mét."
+                    return out
+                case .insufficientFeatures:
+                    out.text = "Ít chi tiết để neo map — nhắm góc bàn/ghế cửa, tránh chỉ có một vách phẳng."
+                    return out
+                @unknown default:
+                    break
+                }
+            case .normal:
+                break
+            @unknown default:
+                break
+            }
+
+            if angularRadPerSec > angH || linearInstant > linH {
+                let dps = Int(angularRadPerSec * 180 / Float.pi)
+                if angularRadPerSec > angH && linearInstant > linH {
+                    out.text = "Đang đi ~\(Int(linearInstant * 100)) cm/s và xoay ~\(dps)°/giây — dễ bị chồng ảnh (ghosting)." + tip
+                } else if angularRadPerSec > angH {
+                    out.text = "Xoay điện thoại quá nhanh (~\(dps)°/giây) — ảnh dán lên mesh sẽ bị mờ và double edges." + tip
+                } else {
+                    out.text = "Đi tay quá nhanh (~\(Int(linearInstant * 100)) cm/s) — frame motion blur không được ghép vào texture."
+                    out.shouldHapticPulse = true
+                }
+                out.isCritical = true
+                if angularRadPerSec > angH || linearInstant > linH {
+                    out.shouldHapticPulse = true
+                }
+                return out
+            }
+            if angularRadPerSec > angS || linearUISpeed > linS || linearInstant > linS {
+                out.text = "Hơi nhanh — chậm hơn một chút. Tay vững, xoay như tripod; mỗi góc nên được giữ trong vài giây."
+                return out
+            }
+
+            switch subject {
+            case .room:
+                out.text = "Điều kiện tốt ✓ Ghim mỗi góc 2–3 giây, tránh chỉ vuốt nhanh qua mặt máy/màn/kệ."
+            case .nearbyObject:
+                out.text = "Điều kiện tốt ✓ Quanh vật 2–3 vòng với hai khoảng cách cố định, đứng yên trong mỗi khung một chút."
+            case .ultraDetailObject:
+                out.text = "Điều kiện tốt ✓ Mép và lỗ nhỏ: chạy rất chậm, có thể dừng hẳn 1 nhịp tại chỗ mép để không trôi mesh."
+            }
+            return out
+        }
+
+        private func fusionLinearLimit(_ s: ARMeshExporter.ExportSubject) -> Float {
+            switch s { case .room: 0.34; case .nearbyObject: 0.12; case .ultraDetailObject: 0.075 }
+        }
+
+        private func fusionAngularLimit(_ s: ARMeshExporter.ExportSubject) -> Float {
+            switch s { case .room: 0.92; case .nearbyObject: 0.52; case .ultraDetailObject: 0.34 }
+        }
+
+        private func linearHardThreshold(_ s: ARMeshExporter.ExportSubject) -> Float {
+            switch s { case .room: 0.32; case .nearbyObject: 0.12; case .ultraDetailObject: 0.068 }
+        }
+
+        private func angularHardThreshold(_ s: ARMeshExporter.ExportSubject) -> Float {
+            fusionAngularLimit(s)
         }
 
         private func mergeMeshAnchors(from anchors: [ARAnchor]) {
@@ -546,6 +750,8 @@ struct LiDARMeshScanContainer: View {
     @State private var scanStageText  = "Đang khởi động..."
     @State private var isMovingTooFast = false
     @State private var frozenBlockCount = 0
+    @State private var captureHintText = ""
+    @State private var captureHintCritical = false
 
     // Export / share
     @State private var isExporting    = false
@@ -574,6 +780,8 @@ struct LiDARMeshScanContainer: View {
                 prefersPatchCapture: .constant(scanCategory == .object && !detailPatches.isEmpty),
                 autoFrozenCount: $frozenBlockCount,
                 isMarkingReferencePoints: $isMarkingMode,
+                captureHintText: $captureHintText,
+                captureHintCritical: $captureHintCritical,
                 onReferenceTapped: placeReferencePoint,
                 prepareForAR: prepareForAR,
                 isTabActive: isTabActive
@@ -588,6 +796,12 @@ struct LiDARMeshScanContainer: View {
 
             VStack(spacing: 0) {
                 topBar.padding(.top, 8)
+                if !captureHintText.isEmpty {
+                    captureQualityBanner
+                        .padding(.horizontal, 12)
+                        .padding(.top, 10)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
                 Spacer()
                 if isMarkingMode { markingOverlay.padding(.bottom, 20) }
                 bottomPanel
@@ -672,6 +886,31 @@ struct LiDARMeshScanContainer: View {
         .transition(.opacity)
     }
 
+    /// Thanh cảnh báo chất lượng capture (motion / tracking ARKit).
+    private var captureQualityBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: captureHintCritical ? "bolt.triangle.fill" : "checkmark.circle.fill")
+                .font(.title3)
+                .foregroundStyle(Color.white.opacity(0.95))
+                .shadow(radius: 2)
+            Text(captureHintText)
+                .font(.caption)
+                .foregroundStyle(.white)
+                .fixedSize(horizontal: false, vertical: true)
+                .shadow(color: .black.opacity(0.35), radius: 3, x: 0, y: 1)
+        }
+        .padding(EdgeInsets(top: 12, leading: 14, bottom: 12, trailing: 14))
+        .frame(maxWidth: .infinity)
+        .background(captureHintCritical ? Color.orange.opacity(0.93) : Color.black.opacity(0.72))
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(captureHintCritical ? 0.28 : 0.12), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
+        .allowsHitTesting(false)
+    }
+
     // MARK: Bottom panel
 
     private var bottomPanel: some View {
@@ -710,14 +949,6 @@ struct LiDARMeshScanContainer: View {
                         statChip("\(referencePoints.count)", icon: "mappin.circle.fill", color: .orange)
                     }
                     Spacer()
-                }
-
-                // Speed warning
-                if isMovingTooFast {
-                    Label(speedWarning, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.orange)
-                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 // Reference-point strip
@@ -869,13 +1100,6 @@ struct LiDARMeshScanContainer: View {
         }
     }
 
-    private var speedWarning: String {
-        switch exportSubject {
-        case .room:             "Di chuyển quá nhanh – chậm lại"
-        case .nearbyObject:     "Quét chậm hơn để giữ chi tiết"
-        case .ultraDetailObject:"Cần gần như đứng yên giữa các frame"
-        }
-    }
 
     // MARK: Logic helpers
 
