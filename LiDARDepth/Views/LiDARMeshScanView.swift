@@ -13,8 +13,8 @@ import ARKit
 
 // MARK: - Logging
 
-/// Centralised, prefixed log helper.  All output goes to Xcode's debug console.
-/// Filter in console: type  "[SCAN]"  "[AR]"  "[EXPORT]"  "[ERROR]"  to focus.
+/// Helper log có prefix cố định; ra console debug Xcode.
+/// Lọc console: "[SCAN]" "[AR]" "[EXPORT]" "[ERROR]" để tập trung.
 private enum ScanLog {
     static func ar(_ msg: String)     { print("[AR]     \(msg)") }
     static func scan(_ msg: String)   { print("[SCAN]   \(msg)") }
@@ -58,7 +58,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
     @Binding var autoFrozenCount: Int
     @Binding var isMarkingReferencePoints: Bool
     @Binding var captureHintText: String
-    /// `true` = ARKit báo hoặc cần dừng ngay — banner đỏ/cam đậm
+    /// `true`: gợi ý nghiêm trọng (motion/tracking) — banner cam đậm + `bolt.triangle.fill` (khác nền đen khi ổn).
     @Binding var captureHintCritical: Bool
 
     var onReferenceTapped: (SIMD3<Float>) -> Void
@@ -151,7 +151,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
         private var lastRecordedCamPos: SIMD3<Float>?
         private var lastSpeedTimestamp: TimeInterval?
         private var lastSpeedCamPos: SIMD3<Float>?
-        /// Tốc độ tức thời — cập nhật mọi frame (khác khoảng 0.25s của UI stats).
+        /// Tốc độ tức thời: cập nhật mỗi ARFrame (khác phần stats UI đang throttle ~0.25s).
         private var lastMotionPos: SIMD3<Float>?
         private var lastMotionTime: TimeInterval?
         private var lastNegativeHapticTime: TimeInterval = 0
@@ -160,7 +160,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
             UIImpactFeedbackGenerator(style: .heavy)
         }()
 
-        /// (timestamp, normalized forward) — đo tốc độ quay rad/s
+        /// (timestamp, forward đã chuẩn hóa) để ước lượng vận tốc góc (rad/s).
         private var lastForwardSample: (TimeInterval, SIMD3<Float>)?
         private let autoFreezeDelay: TimeInterval = 3.0
         private var anchorLastChangeTime: [UUID: TimeInterval] = [:]
@@ -558,7 +558,7 @@ struct LiDARMeshScanView: UIViewRepresentable {
             }
         }
 
-        /// Tránh spam console (~60 FPS).
+        /// Throttle log fusion-skip — không in mỗi frame (~60 FPS) làm đầy console.
         private var lastFusionSkipLogWall: TimeInterval = 0
         private func throttleFusionSkipLog(_ block: () -> Void) {
             let t = ProcessInfo.processInfo.systemUptime
@@ -787,9 +787,9 @@ struct LiDARMeshScanContainer: View {
                 isTabActive: isTabActive
             )
             .ignoresSafeArea()
-            // NOTE: không nil arViewRef khi sheet mở (SwiftUI có thể fire onDisappear
-            // ngay cả khi chỉ present sheet, khiến export thấy arViewRef=nil).
-            // ARView sẽ tự giải phóng khi thật sự rời tab.
+            // NOTE: Đừng set arViewRef = nil ở đây khi mở sheet — SwiftUI vẫn có thể gọi
+            // onDisappear trong lúc present sheet, khiến export tưởng ref mất.
+            // Chỉ giải phóng ARView khi user thật sự thoát tab Quét.
             .onDisappear {
                 ScanLog.ar("LiDARMeshScanView onDisappear — arViewRef giữ nguyên để export tiếp được")
             }
@@ -886,7 +886,7 @@ struct LiDARMeshScanContainer: View {
         .transition(.opacity)
     }
 
-    /// Thanh cảnh báo chất lượng capture (motion / tracking ARKit).
+    /// Banner gợi ý chất lượng quét — motion blur + trạng thái tracking ARKit.
     private var captureQualityBanner: some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: captureHintCritical ? "bolt.triangle.fill" : "checkmark.circle.fill")
@@ -1161,7 +1161,7 @@ struct LiDARMeshScanContainer: View {
         exportMessage = "✅ Vùng \(frozenBlockCount) đã lưu.\(dimText)"
     }
 
-    /// Returns the X/Y/Z extent (in metres) of the world-space bounding box of the given anchors.
+    /// Phạm vi X/Y/Z (mét) của AABB không gian thế giới chứa toàn bộ đỉnh trong `anchors`.
     private func boundingBoxDimensions(of anchors: [ARMeshAnchor]) -> SIMD3<Float>? {
         var lo = SIMD3<Float>(repeating:  Float.greatestFiniteMagnitude)
         var hi = SIMD3<Float>(repeating: -Float.greatestFiniteMagnitude)
@@ -1248,25 +1248,6 @@ struct LiDARMeshScanContainer: View {
                 } else {
                     errors.append("GLB thất bại")
                     ScanLog.error("GLB build trả về nil")
-                }
-
-                // OBJ + MTL + texture
-                let texName = "scan-\(stamp).jpg"
-                ScanLog.export("Đang build OBJ+texture...")
-                let t2 = Date()
-                if let bundle = ARMeshExporter.buildTexturedOBJBundle(
-                    from: session, textureFilename: texName, profile: profile, detailPatches: patches) {
-                    let objURL = dir.appendingPathComponent("scan-\(stamp).obj")
-                    let mtlURL = dir.appendingPathComponent("scan-\(stamp).mtl")
-                    let texURL = dir.appendingPathComponent(texName)
-                    try bundle.obj.write(to: objURL, atomically: true, encoding: .utf8)
-                    try bundle.mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
-                    try bundle.textureJPEG.write(to: texURL, options: .atomic)
-                    urls.append(contentsOf: [objURL, mtlURL, texURL])
-                    ScanLog.export("OBJ ✓  obj=\(bundle.obj.utf8.count/1024)KB  jpg=\(bundle.textureJPEG.count/1024)KB  elapsed=\(String(format:"%.1f",Date().timeIntervalSince(t2)))s")
-                } else {
-                    errors.append("OBJ thất bại")
-                    ScanLog.error("OBJ build trả về nil")
                 }
 
                 // Reference points JSON

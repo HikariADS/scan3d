@@ -1,6 +1,6 @@
 /*
- Abstract:
- Wavefront OBJ / PLY export from ARKit scene mesh, with per-vertex camera colors and normals.
+ Tóm tắt:
+ Xuất mesh scene ARKit dạng Wavefront OBJ / PLY, có màu camera theo đỉnh và pháp tuyến.
  */
 
 import ARKit
@@ -12,26 +12,26 @@ import simd
 import UIKit
 import UniformTypeIdentifiers
 
-// MARK: - Fusion colour pipeline (do NOT store ARFrame in arrays — ARSession retains ≤~4 camera buffers)
+// MARK: - Pipeline fusion màu (KHÔNG giữ ARFrame trong mảng — ARSession giữ ≤~4 buffer camera)
 
-/// HEIC (10-bit friendly, fewer block artefacts than JPEG) or JPEG fallback for snapshot blobs.
+/// Codec snapshot: HEIC (thân thiện 10-bit, ít block artefact hơn JPEG) hoặc JPEG khi fallback.
 private enum FusionSnapshotImageCodec: UInt8 {
     case heic = 0
     case jpeg = 1
 }
 
-/// Downsampled depth stored with each snapshot so historical frames can run the same median occlusion
-/// without holding full `CVPixelBuffer` history. ~96×72×2 B ≈ 14 KiB per frame (memory-safe vs full maps).
+/// Depth đã downsample đi kèm mỗi snapshot để frame cũ vẫn chạy cùng logic median occlusion,
+/// không cần lưu cả history `CVPixelBuffer` đầy đủ. ~96×72×2 B ≈ 14 KiB/frame (an toàn RAM hơn full map).
 private struct FusionPackedMiniDepth: Equatable {
     let gridW: Int
     let gridH: Int
-    /// Row-major UInt16 depth in millimetres (LE). `0` = invalid / unknown.
+    /// Độ sâu UInt16 theo hàng (LE), đơn vị mm. `0` = không hợp lệ / không biết.
     let millimetresLE: Data
 
     private static let maxGridW = 96
     private static let maxGridH = 72
 
-    /// Pack from ARKit depth map (float metres). Coordinates align to `imageWidth`×`imageHeight` pixel grid.
+    /// Pack từ depth map ARKit (float mét). Tọa độ căn grid pixel `imageWidth`×`imageHeight`.
     static func encode(depthMap: CVPixelBuffer, imageWidth: Int, imageHeight: Int) -> FusionPackedMiniDepth? {
         let dw = CVPixelBufferGetWidth(depthMap)
         let dh = CVPixelBufferGetHeight(depthMap)
@@ -104,7 +104,7 @@ private struct FusionPackedMiniDepth: Equatable {
     }
 }
 
-/// 16-bin luma histogram → 17-point CDF for cheap per-pixel tone matching (reference = first live frame in fusion).
+/// Histogram luma 16 bin → CDF 17 điểm để căn tone rẻ theo pixel (tham chiếu = frame live đầu tiên trong fusion).
 private enum FusionLumaHistogram {
     private static let binCount = 16
 
@@ -179,7 +179,7 @@ private enum FusionLumaHistogram {
         total += 1
     }
 
-    /// Map scalar luma through source CDF into reference CDF (histogram match, O(bin) inverse).
+    /// Ánh xạ luma qua CDF nguồn sang CDF tham chiếu (histogram match, nghịch đảo O(số bin)).
     static func matchLuma(_ y: Float, cdfSource: ContiguousArray<Float>, cdfRef: ContiguousArray<Float>) -> Float {
         guard cdfSource.count == 17, cdfRef.count == 17 else { return y }
         let yy = simd_clamp(y, 0, 1)
@@ -188,7 +188,7 @@ private enum FusionLumaHistogram {
         let i1 = min(binCount, i0 + 1)
         let t = f - Float(i0)
         let u = cdfSource[i0] * (1 - t) + cdfSource[i1] * t
-        // Invert ref CDF
+        // Nghịch đảo CDF tham chiếu
         var k = 0
         while k < binCount, cdfRef[k + 1] < u {
             k += 1
@@ -201,22 +201,22 @@ private enum FusionLumaHistogram {
     }
 }
 
-/// Live or decoded snapshot — used for projection + RGB sampling without holding `ARFrame` in history.
+/// Snapshot live hoặc đã decode — dùng cho projection + sampling RGB mà không giữ `ARFrame` trong history.
 private protocol ColorFusionFrame: AnyObject {
     var fusionTimestamp: TimeInterval { get }
     var fusionCameraTransform: simd_float4x4 { get }
     var fusionIntrinsics: simd_float3x3 { get }
     var fusionImageResolution: CGSize { get }
     var fusionCapturedImage: CVPixelBuffer { get }
-    /// Live LiDAR depth at full resolution when available.
+    /// Depth LiDAR live full-res khi có.
     var fusionDepthMap: CVPixelBuffer? { get }
-    /// Coarse depth captured with each snapshot (historical frames); live adapter returns nil (uses `fusionDepthMap`).
+    /// Depth thô đi kèm mỗi snapshot (frame cũ); adapter live trả `nil` và dùng `fusionDepthMap`.
     var fusionPackedMiniDepth: FusionPackedMiniDepth? { get }
-    /// 17-point cumulative luma distribution (0…1) for histogram matching.
+    /// Phân phối luma tích lũy 17 điểm (0…1) phục vụ histogram match.
     var fusionLumaCDF: ContiguousArray<Float> { get }
-    /// ~0–1 from coarse Laplacian energy; lowers weight when frame is blurry.
+    /// ~0–1 từ năng lượng Laplacian thô; frame mờ thì giảm weight.
     var fusionImageSharpness01: Float { get }
-    /// Approx mean scene luminance 0–1 for mild exposure normalization before fusion.
+    /// Ước lượng độ sáng trung bình scene 0–1 để chỉnh exposure nhẹ trước fusion.
     var fusionMeanLuminance01: Float { get }
 }
 
@@ -289,7 +289,7 @@ private final class DecodedStillFusionAdapter: ColorFusionFrame {
 
 private enum FusionStillImageDecode {
     static func pixelBufferBGRA(from data: Data, codec: FusionSnapshotImageCodec) -> CVPixelBuffer? {
-        _ = codec // HEIC and JPEG both decode via UIImage; codec reserved for future fast paths
+        _ = codec // HEIC và JPEG đều decode qua UIImage; giữ codec cho đường nhanh tương lai
         guard let image = UIImage(data: data), let cg = image.cgImage else { return nil }
         let w = cg.width
         let h = cg.height
@@ -318,7 +318,7 @@ private enum FusionStillImageDecode {
     }
 }
 
-/// Lấy **trung bình luma + proxy độ nét** (mean |Laplacian| trên grid thưa). Rẻ đủ để gọi mỗi lần record snapshot / fresh cache.
+/// **Metrics ảnh**: trung bình luma + proxy độ nét (mean |Laplacian| trên grid thưa). Đủ rẻ để gọi mỗi lần ghi snapshot hoặc làm fresh cache.
 private enum FrameImageMetrics {
     static func compute(_ pixelBuffer: CVPixelBuffer) -> (meanLuma01: Float, sharpness01: Float) {
         CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
@@ -339,7 +339,7 @@ private enum FrameImageMetrics {
         simd_clamp(x, 0, 1)
     }
 
-    /// Trung bình luma grid + coarse Laplacian energy → map qua tanh vào ~0–1.
+    /// Luma trung bình trên grid + năng lượng Laplacian coarse → đưa qua tanh về khoảng 0–1.
     private static func computeYPlane420(_ pb: CVPixelBuffer) -> (meanLuma01: Float, sharpness01: Float) {
         guard let baseY = CVPixelBufferGetBaseAddressOfPlane(pb, 0)?.assumingMemoryBound(to: UInt8.self) else {
             return (0.42, 0.45)
@@ -426,9 +426,9 @@ private enum FrameImageMetrics {
     }
 }
 
-// MARK: - Debug diagnostics
+// MARK: - Diagnostics debug
 
-/// Thread-safe counters cho mỗi lần export. Reset trước mỗi lần build.
+/// Counter diagnostics thread-safe cho mỗi lần export; reset trước mỗi lần build.
 private final class ColorDiag: @unchecked Sendable {
     private let q = DispatchQueue(label: "ColorDiag")
     private var _total = 0
@@ -635,7 +635,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.11
             }
         }
-        /// Median(depth 3×3) phải tương thích mesh; gap lớn → nhiều noisy/hole → bỏ vì hay gây smear texture.
+        /// Median(depth 3×3) phải khớp độ sâu geometry; lệch nhiều thường là noise/lỗ hổng → bỏ (tránh smear texture).
         var maxMedianDepthNeighborSpreadMeters: Float {
             switch subject {
             case .room: return 0.38
@@ -643,8 +643,8 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.20
             }
         }
-        /// **`exp(-k * distance²)` trong weight fusion** — k lớn = ưu tiên máy ảnh gần. Khi `dist² = 1/k` thì Gaussian ≈ 1/e (~37%).
-        /// Gợi ý chỉnh: lia nhanh mà xa → giảm k; chỉ có view xa → giảm k.
+        /// **`exp(-k * distance²)` trong weight fusion** — k lớn = bias về viewpoint gần. Với `dist² = 1/k` thì Gaussian ≈ 1/e (~37%).
+        /// Tune: quét/rời xa nhanh → giảm k; toàn frame xa máy → giảm k.
         var fusionGaussianDistanceK: Float {
             switch subject {
             case .room: return 0.24
@@ -652,7 +652,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.55
             }
         }
-        /// `weight *= 1 + scale * clipped(gradient)`. Tăng scale = ưu tiên mép/ghi chi tiết; quá cao ↔ nhiễu JPEG.
+        /// `weight *= 1 + scale * clipped(gradient)`. scale cao → ưu tiên mép/high‑freq; quá đà → artefact JPEG.
         var fusionEdgeBoostScale: Float {
             switch subject {
             case .room: return 0.42
@@ -660,7 +660,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.79
             }
         }
-        /// JPEG history không có LiDAR map — chỉ góp nếu bề mặt khá frontal (substitute occlusion).
+        /// Ảnh JPEG trong history không có depth LiDAR — chỉ được góp khi mặt tương đối frontal (thay cho occlusion có depth đầy đủ).
         var fusionMinFrontalContributionNoLiDAR: Float {
             switch subject {
             case .room: return 0.26
@@ -677,9 +677,9 @@ enum ARMeshExporter {
         }
         var atlasFrameCount: Int {
             switch subject {
-            case .room: return 6
-            case .nearbyObject: return 4
-            case .ultraDetailObject: return 16
+            case .room: return 12          // trước 6 — thêm ô để phủ quét cả phòng
+            case .nearbyObject: return 8   // trước 4
+            case .ultraDetailObject: return 24 // trước 16
             }
         }
         var prefersAggressiveOcclusion: Bool {
@@ -699,7 +699,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.47
             }
         }
-        /// Khi best vượt runner-up theo tỷ lệ này (và đủ `bestFrameMinAbsoluteWeight`) → chỉ best, không fuse.
+        /// Khi best áp đảo runner-up đủ tỉ lệ này (và đủ `bestFrameMinAbsoluteWeight`) → lấy mỗi best, không blend.
         var bestFrameDominanceRatio: Float {
             switch subject {
             case .room: return 2.05
@@ -707,7 +707,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 2.65
             }
         }
-        /// Ngưỡng weight tối thiểu để dominance ratio được xét (đủ “tín hiệu” raster).
+        /// Ngưỡng weight tối thiểu để xét dominance (đủ “tín hiệu” raster, không chỉ là noise nhỏ).
         var bestFrameMinAbsoluteWeight: Float {
             switch subject {
             case .room: return 0.11
@@ -715,7 +715,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.14
             }
         }
-        /// Trên ngưỡng này: luôn lấy màu best (pixel confidence cao → tránh làm mềm).
+        /// Trên ngưỡng này: luôn pick nguyên màu frame best (confidence cao → tránh làm nhòe blend).
         var bestFrameAbsolutePickWeight: Float {
             switch subject {
             case .room: return 0.38
@@ -723,7 +723,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.52
             }
         }
-        /// Khi weight best rất cao nhưng chưa absolute-pick → thu nhỏ blend xuống.
+        /// Best weight rất cao nhưng chưa tới ngưỡng absolute-pick → siết nhẹ blend.
         var bestFrameHeavyWeightThreshold: Float {
             switch subject {
             case .room: return 0.22
@@ -738,7 +738,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.42
             }
         }
-        /// Góc grazing (1−n·v): siết tolerance depth để giảm “ăn nhầm” ở rìa nghiêng.
+        /// Grazing angle (1−n·v): siết tolerance depth để không “ăn nhầm” occlusion ở rìa nghiêng.
         var fusionNormalOcclusionTolScaleMin: Float {
             switch subject {
             case .room: return 0.82
@@ -753,7 +753,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.78
             }
         }
-        /// Bilinear − Gaussian: tăng vi mịn có gate Sobel để không thổi noise đồng nhất.
+        /// Micro-contrast (bilinear − Gaussian): tăng chi tiết vi mô có gate Sobel để không khuếch đại nhiễu đồng nhất.
         var fusionMicroContrastStrength: Float {
             switch subject {
             case .room: return 0.22
@@ -761,7 +761,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.38
             }
         }
-        /// Nhịp thời gian hẹp hơn ↔ ít dao động màu giữa khung trong fuse.
+        /// Temporal window chặt hơn ↔ ít “nhảy” màu giữa các frame khi fuse.
         var fusionTemporalBaseline: Float {
             switch subject {
             case .room: return 0.78
@@ -776,7 +776,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.14
             }
         }
-        /// Khung fusion đầu (thường live) được boost để neo màu theo khung hiện tại.
+        /// Frame fusion làm neo (thường live/current) được boost weight để bám màu sát viewpoint hiện tại.
         var fusionReferenceFrameWeightBoost: Float {
             switch subject {
             case .room: return 1.12
@@ -798,7 +798,7 @@ enum ARMeshExporter {
             case .ultraDetailObject: return 0.38
             }
         }
-        /// Độ mạnh “ripple” quanh luma từng đỉnh — bù wash-out sau fuse multi-frame (không cần patch ảnh lân cận).
+        /// Độ mạnh “ripple” quanh local luma đỉnh — bù wash-out sau fuse multi‑frame (không cần patch ảnh lân cận).
         var postFusionLocalContrastRipple: Float {
             switch subject {
             case .room: return 0.050
@@ -808,29 +808,28 @@ enum ARMeshExporter {
         }
         var saturationBoost: Float {
             switch subject {
-            case .room: return 2.20   // strong — recover vivid real-world colours
+            case .room: return 2.20   // mạnh — phục hồi màu thực tế rực hơn
             case .nearbyObject: return 2.40
             case .ultraDetailObject: return 2.60
             }
         }
-        /// S-curve contrast strength. Higher = more tonal separation (dark→dark, bright→bright).
+        /// Độ mạnh contrast dạng S-curve; cao hơn = tách tonal rõ hơn (tối và sáng tách mép).
         var contrastBoost: Float {
             switch subject {
-            case .room: return 1.55   // punchy — keeps whites distinct from mid-tones
+            case .room: return 1.55   // đậm — trắng tách khỏi mid-tone
             case .nearbyObject: return 1.70
             case .ultraDetailObject: return 1.85
             }
         }
-        /// Gamma > 1 darkens the image. Use to counter the over-bright (washed-out) look
-        /// produced by ARKit's auto-exposed camera frames.
+        /// Gamma > 1 làm ảnh tối hơn — bù cảnh sáng quá / washed-out của frame camera auto exposure ARKit.
         var gammaCorrection: Float {
             switch subject {
-            case .room: return 1.20   // darken ~20 % — prevents blown-out surfaces
+            case .room: return 1.20   // tối đi ~20% — tránh bề mặt trắng sáng tụt detail
             case .nearbyObject: return 1.12
             case .ultraDetailObject: return 1.05
             }
         }
-        /// Laplacian màu đỉnh GLB — ít pass / độ mạnh thấp hơn → giữ sắc nét polycam-lite.
+        /// Laplacian trên vertex colour GLB — ít pass, strength nhẹ để preset polycam-lite không bị nhòe/mất cạnh.
         var glbColorSmoothPasses: Int {
             switch subject {
             case .room: return 1
@@ -861,7 +860,7 @@ enum ARMeshExporter {
         }
     }
 
-    // MARK: - Reference Points (for mesh alignment export)
+    // MARK: - Điểm chuẩn (xuất căn chỉnh mesh)
 
     struct ReferencePoint: Identifiable {
         let id: UUID
@@ -890,8 +889,8 @@ enum ARMeshExporter {
         refQueue.sync { _referencePoints.removeAll() }
     }
 
-    /// Encodes all reference points as pretty-printed JSON ready to ship alongside the OBJ.
-    /// Returns nil if no points have been placed.
+    /// Encode toàn bộ điểm chuẩn thành JSON pretty-print đi kèm OBJ.
+    /// Trả `nil` nếu chưa đặt điểm nào.
     static func buildReferencePointsJSON() -> Data? {
         let points = refQueue.sync { _referencePoints }
         guard !points.isEmpty else { return nil }
@@ -917,11 +916,10 @@ enum ARMeshExporter {
         return try? encoder.encode(export)
     }
 
-    // MARK: - Frozen mesh blocks (Polycam-style block scanning)
+    // MARK: - Frozen mesh block (kiểu quét block Polycam)
 
-    /// A snapshot of world-space geometry captured when the user presses "Chụp vùng".
-    /// Frozen blocks persist regardless of ARKit anchor updates so triangles
-    /// from already-scanned areas are never lost when the camera moves away.
+    /// Snapshot geometry không gian thế giới khi user bấm "Chụp vùng".
+    /// Frozen block không đổi khi anchor ARKit cập nhật — tam giác khu đã quét không mất khi máy đi chỗ khác.
     struct FrozenMeshBlock {
         let positions: [SIMD3<Float>]
         let indices: [UInt32]
@@ -930,8 +928,8 @@ enum ARMeshExporter {
 
     private static let frozenQueue = DispatchQueue(label: "ARMeshExporter.frozen")
     private static var _frozenBlocks: [FrozenMeshBlock] = []
-    /// IDs of ARMeshAnchors whose geometry has been committed to a frozen block.
-    /// prepareMeshes skips these from the live session to avoid double-counting.
+    /// ID các `ARMeshAnchor` đã được "đóng băng" vào một block.
+    /// `prepareMeshes` bỏ qua các anchor này ở session live để không đếm trùng.
     private static var _frozenAnchorIDs: Set<UUID> = []
 
     static var frozenBlockCount: Int {
@@ -942,13 +940,13 @@ enum ARMeshExporter {
         frozenQueue.sync { _frozenBlocks }
     }
 
-    /// IDs already snapshotted — used by prepareMeshes to skip live duplicates.
+    /// Đã snapshot — `prepareMeshes` dùng để bỏ trùng với geometry live.
     static var frozenAnchorIDs: Set<UUID> {
         frozenQueue.sync { _frozenAnchorIDs }
     }
 
-    /// Snapshot the given anchors and mark their IDs as frozen.
-    /// Subsequent exports will use the snapshot and skip the live anchor data.
+    /// Snapshot các anchor chỉ định và đánh dấu ID là frozen.
+    /// Export sau dùng snapshot đó và bỏ qua geometry live của các anchor đó.
     static func freezeCurrentAnchors(_ anchors: [ARMeshAnchor]) {
         var positions: [SIMD3<Float>] = []
         var indices: [UInt32] = []
@@ -970,7 +968,7 @@ enum ARMeshExporter {
         }
     }
 
-    /// Remove all frozen blocks and clear the frozen-anchor ID set.
+    /// Xóa mọi frozen block và reset tập ID frozen.
     static func clearFrozenBlocks() {
         frozenQueue.sync {
             _frozenBlocks.removeAll()
@@ -978,13 +976,13 @@ enum ARMeshExporter {
         }
     }
 
-    // MARK: - Multi-frame colour history (HEIC snapshots — never stash ARFrame in arrays)
+    // MARK: - History màu đa khung (snapshot HEIC — không stash `ARFrame` trong mảng)
 
-    /// HEIC HEVC still: ít blocking/mosquito hơn JPEG ở cùng bitrate → giữ high‑frequency cho fusion; fallback JPEG nếu encode thất bại.
+    /// HEIC (HEVC) still: cùng bitrate thường ít blocking/mosquito noise hơn JPEG → giữ high‑frequency cho fusion; thất bại thì fallback JPEG.
     private static let fusionSnapshotHEICQuality: CGFloat = 0.88
 
-    /// Compact camera observation for fusion. ARKit forbids delegates from retaining many `ARFrame`
-    /// (camera backs up → few fusion frames → mass grey / UV fallback exactly like your log).
+    /// Quan sát camera gọn cho fusion; ARKit không cho delegate retain nhiều `ARFrame`
+    /// (camera bị backlog → ít frame fusion → rất nhiều xám / fallback UV).
     private struct FusionFrameSnapshot {
         let timestamp: TimeInterval
         let cameraTransform: simd_float4x4
@@ -992,10 +990,10 @@ enum ARMeshExporter {
         let imageResolution: CGSize
         let imageBlob: Data
         let imageCodec: FusionSnapshotImageCodec
-        /// Thumbnail depth pack (optional) — cho occlusion lịch sử mà không giữ full depth buffer.
+        /// Depth pack thumbnail (tuỳ chọn) — phục vụ occlusion trong history không cần full depth buffer.
         let miniDepthPayload: Data?
         let lumaCDF: ContiguousArray<Float>
-        /// Từ lúc encode — dùng lại cho decode adapters (ảnh nén không giữ metadata độ phơi).
+        /// Metrics tại encode — đưa xuống decode adapter (JPEG/HEIC thường mất exposure metadata của frame camera).
         let meanLuminance01: Float
         let sharpness01: Float
 
@@ -1034,15 +1032,17 @@ enum ARMeshExporter {
     private static var frameSnapshotHistory: [FusionFrameSnapshot] = []
     private static var patchFrameSnapshotHistory: [UUID: [FusionFrameSnapshot]] = [:]
 
-    /// ~100 snapshots × HEIC+blob nhỏ ≈ manageable RAM vs 12 live ARFrames starving the pipeline.
-    private static let maxHistorySnapshots = 100
-    /// Ít khung được chọn hơn — giảm decode/mỗi lần materialize và CPU export.
+    /// ~100 snapshot HEIC + blob nhỏ vẫn tiêu ít RAM hơn cố giữ nhiều `ARFrame` live (ví dụ ~12 frames đã làm backup pipeline ARKit).
+    /// ~300 frame ≈ ~90 MB HEIC — đủ quét phòng full mà vẫn giữ các frame đầu trước khi export.
+    private static let maxHistorySnapshots = 300
+    /// Ít khung hơn `maxHistorySnapshots`: giảm decode mỗi lần materialize và tải CPU khi export.
     private static let maxFusionSnapshots = 11
-    /// Số ảnh still decode **full‑res BGRA** cho fusion đỉnh (cache 1× / miền patch — không được giải mã × mọi đỉnh).
+    /// Ceiling số ảnh still decode **full‑res BGRA** song song cho fusion đỉnh (cache kiểu 1×/patch voxel — không decode × “mọi đỉnh”).
     private static let maxDecodedBGRAFusion = 8
-    /// Atlas texture: vẫn cần nhiều view hơn nhưng không cho phép spike “mọi JPEG cùng lúc”.
-    private static let maxDecodedBGRAAtlas = 8
-    /// Bỏ khung cực mờ khỏi history (still export snap “fresh” từ frame hiện tại như snapshot mới nhất có thể mờ).
+    /// Atlas: cần nhiều view hơn path fusion đỉnh nhưng vẫn cap để không spike decode “dump hết vào IOSurface một lần”.
+    /// Atlas decode nhiều frame hơn để greedy coverage bọc được mọi vùng đã quét.
+    private static let maxDecodedBGRAAtlas = 20
+    /// Không ghi frame quá mờ vào history (`recordFrameForColorFusion` bỏ qua); “fresh” decode từ `ARFrame` live vẫn có thể hơi mờ nhưng thường chấp nhận được.
     private static let minSharpnessToRecordHistory: Float = 0.048
 
     private static let freshSnapshotCacheLock = NSLock()
@@ -1053,7 +1053,7 @@ enum ARMeshExporter {
         recordFrameForColorFusion(frame, cameraPosition: nil, detailPatches: [], preferPatchHistory: false)
     }
 
-    /// Chấp nhận `initializing` / `insufficientFeatures` nhưng từ chối các trạng thái gây artefact nặng.
+    /// Cho phép `.initializing` / `.insufficientFeatures`; reject motion quá đà và relocalizing (artefact nặng/nhất quán kém).
     static func shouldRecordFrameForFusion(_ frame: ARFrame) -> Bool {
         switch frame.camera.trackingState {
         case .normal:
@@ -1075,6 +1075,36 @@ enum ARMeshExporter {
         return true
     }
 
+    /// Evict một frame thừa nhất theo không gian khỏi `history`.
+    /// "Thừa nhất": frame nội bộ có vị trí máy gần một trong hai hàng xóm timeline,
+    /// weight thêm `(1 − sharpness)` để frame mờ trùng viewpoint bị đẩy trước.
+    ///
+    /// O(n), gọi mỗi lần append frame mới được (n ≤ maxHistorySnapshots).
+    /// Phải gọi trên `historyQueue` (hoặc trong block `sync`).
+    private static func spatiallyEvictOneFrame(from history: inout [FusionFrameSnapshot]) {
+        guard history.count >= 3 else {
+            if !history.isEmpty { history.removeFirst() }
+            return
+        }
+        var bestIdx = 1
+        var bestScore: Float = -.greatestFiniteMagnitude  // higher score = more redundant
+        for i in 1..<history.count - 1 {
+            let pPrev = FusionFrameSnapshot.camPosition(history[i - 1])
+            let pCurr = FusionFrameSnapshot.camPosition(history[i])
+            let pNext = FusionFrameSnapshot.camPosition(history[i + 1])
+            // Khoảng cách tới hàng xóm gần nhất nhỏ → redundant không gian cao.
+            let minNeighbourDist = min(simd_length(pCurr - pPrev), simd_length(pCurr - pNext))
+            // Nghịch đảo khoảng cách: gần hơn (redundant hơn) → điểm cao hơn.
+            // Cộng bonus độ mờ để bản duplicate mờ bị evict trước.
+            let redundancyScore = (1.0 / (minNeighbourDist + 0.001)) + (1.0 - history[i].sharpness01) * 0.5
+            if redundancyScore > bestScore {
+                bestScore = redundancyScore
+                bestIdx = i
+            }
+        }
+        history.remove(at: bestIdx)
+    }
+
     static func recordFrameForColorFusion(
         _ frame: ARFrame,
         cameraPosition: SIMD3<Float>?,
@@ -1089,7 +1119,10 @@ enum ARMeshExporter {
             }
             frameSnapshotHistory.append(snap)
             if frameSnapshotHistory.count > maxHistorySnapshots {
-                frameSnapshotHistory.removeFirst(frameSnapshotHistory.count - maxHistorySnapshots)
+                // Eviction không gian: bỏ frame có viewpoint gần hàng xóm nhất,
+                // thay vì luôn bỏ cũ nhất — giữ tập frame đa dạng theo không gian,
+                // bọc cả đường đi quét, không chỉ phần timeline gần đây.
+                spatiallyEvictOneFrame(from: &frameSnapshotHistory)
             }
 
             guard preferPatchHistory,
@@ -1104,7 +1137,7 @@ enum ARMeshExporter {
             }
             list.append(snap)
             if list.count > maxHistorySnapshots {
-                list.removeFirst(list.count - maxHistorySnapshots)
+                spatiallyEvictOneFrame(from: &list)
             }
             patchFrameSnapshotHistory[patch.id] = list
         }
@@ -1121,7 +1154,7 @@ enum ARMeshExporter {
         }
     }
 
-    /// Một JPEG + metrics cho frame export — có cache để không encode lặp cho mọi đỉnh GLB/OBJ.
+    /// Một snapshot ảnh nén + metric cho một frame export; cache để không encode lặp đi lặp lại cho từng đỉnh GLB/OBJ.
     private static func freshCachedFusionSnapshot(for current: ARFrame) -> FusionFrameSnapshot? {
         freshSnapshotCacheLock.lock()
         defer { freshSnapshotCacheLock.unlock() }
@@ -1133,7 +1166,7 @@ enum ARMeshExporter {
         return s
     }
 
-    /// Khi ≤ maxKeeps khung → sắp lại ƯNT thô; khi có vị trí → ưu gần + sắc nét cao để không over-blend.
+    /// Ít khung (`≤ maxKeeps`): sort thô theo độ nét / khoảng cách / thời gian; có vị trí đỉnh → ưu gần + nét để tránh blend quá tay.
     private static func sortFusionSnapshotsPreferSharpness(
         _ snaps: [FusionFrameSnapshot],
         maxKeeps: Int,
@@ -1161,7 +1194,7 @@ enum ARMeshExporter {
         return Array(s.prefix(maxKeeps))
     }
 
-    /// Lấy mẫu thời gian rải đều trong phần còn lại (baseline + keyframe không trùng thời).
+    /// Sampling thời gian spaced trong phần còn lại (bao gồm keyframe không trùng timestamp).
     private static func spacedTemporalSamples(_ frames: [FusionFrameSnapshot], take: Int) -> [FusionFrameSnapshot] {
         guard take > 0, !frames.isEmpty else { return [] }
         let sorted = frames.sorted { $0.timestamp < $1.timestamp }
@@ -1180,7 +1213,7 @@ enum ARMeshExporter {
         return Array(out.prefix(take))
     }
 
-    /// Chọn snapshots cho fusion GPU-side (projection + colour). Không chứa `ARFrame`.
+    /// Snapshot pipeline fusion (projection + colour); struct nhẹ, không retain `ARFrame`.
     private static func selectFusionSnapshots(
         nearVertex vertexPosition: SIMD3<Float>?,
         including current: ARFrame,
@@ -1244,11 +1277,11 @@ enum ARMeshExporter {
         let voxelCell: SIMD3<Int32>
     }
 
-    /// Kích thước ô không gian (world) để tái materialize fusion — không còn 1 bucket cho toàn mesh.
+    /// Pitch voxel world để chia cache fusion — không còn một global bucket cho whole mesh.
     private static let fusionMaterialVoxelPitchMeters: Float = 0.135
 
     private static let vertexFusionMaterialLock = NSLock()
-    /// LRU nhỏ: tránh spike RAM và map vô hạn.
+    /// LRU nhỏ: tránh spike RAM và dictionary phình không giới hạn.
     private static var vertexFusionMaterialCaches: [VertexFusionMaterialCacheKey: [ColorFusionFrame]] = [:]
     private static var vertexFusionMaterialCacheFifo: [VertexFusionMaterialCacheKey] = []
     private static let maxVertexFusionMaterialCacheEntries = 56
@@ -1278,7 +1311,7 @@ enum ARMeshExporter {
         vertexFusionMaterialLock.unlock()
     }
 
-    /// Xóa LRU cho tới khi còn chỗ trước khi thêm key mới.
+    /// Evict LRU cho đến khi có slot trước khi insert key mới (caller đang giữ lock).
     private static func prepareFusionCacheSlotForNewKey_locked(_ key: VertexFusionMaterialCacheKey) {
         if vertexFusionMaterialCaches[key] != nil { return }
         while vertexFusionMaterialCaches.count >= maxVertexFusionMaterialCacheEntries,
@@ -1287,20 +1320,33 @@ enum ARMeshExporter {
             vertexFusionMaterialCaches.removeValue(forKey: oldest)
         }
     }
-    /// Giới hạn số snapshot cần decode still image → tránh hàng chục IOSurface full‑res cùng lúc (crash `NSMallocException`).
+    /// Giới hạn decode still song song để tránh spike hàng chục IOSurface full‑res (`NSMallocException` khi export lớn).
+    ///
+    /// - Parameter useTemporalSpread: `true` (nhánh atlas): giữ frame rải đều theo timeline
+    ///   để vùng quét sớm vẫn có frame gốc. `false` (fusion đỉnh): giữ frame nét nhất (mặc định).
     private static func capSnapshotsForMaterialize(
         currentTs: TimeInterval,
         snapshots: [FusionFrameSnapshot],
-        maxStillImageDecode: Int
+        maxStillImageDecode: Int,
+        useTemporalSpread: Bool = false
     ) -> [FusionFrameSnapshot] {
         guard maxStillImageDecode > 0 else {
             return snapshots.filter { abs($0.timestamp - currentTs) < 1e-4 }
         }
         var nonLive = snapshots.filter { abs($0.timestamp - currentTs) >= 1e-4 }
         if nonLive.count > maxStillImageDecode {
-            nonLive.sort { $0.sharpness01 > $1.sharpness01 }
-            nonLive = Array(nonLive.prefix(maxStillImageDecode))
-            nonLive.sort { $0.timestamp < $1.timestamp }
+            if useTemporalSpread {
+                // Giữ các frame rải đều trên timeline quét để mọi vùng được quét trước
+                // đây đều còn ứng viên frame — kể cả quét từ lâu trong session.
+                nonLive.sort { $0.timestamp < $1.timestamp }
+                let step = max(1, nonLive.count / maxStillImageDecode)
+                nonLive = stride(from: 0, to: nonLive.count, by: step).map { nonLive[$0] }
+                nonLive = Array(nonLive.prefix(maxStillImageDecode))
+            } else {
+                nonLive.sort { $0.sharpness01 > $1.sharpness01 }
+                nonLive = Array(nonLive.prefix(maxStillImageDecode))
+                nonLive.sort { $0.timestamp < $1.timestamp }
+            }
         }
         let liveFirst = snapshots.first(where: { abs($0.timestamp - currentTs) < 1e-4 })
         if let live = liveFirst {
@@ -1313,15 +1359,22 @@ enum ARMeshExporter {
         return nonLive
     }
 
-    /// Biến snapshot + frame hiện tại → adapters có `CVPixelBuffer` cho sampling.
-    /// `maxStillImageDecode` chặn số buffer BGRA giải mã đồng thời (nguyên nhân crash khi export lớn).
+    /// Materialize snapshots + frame hiện tại thành `ColorFusionFrame` / adapter có `CVPixelBuffer`.
+    /// `maxStillImageDecode` cap đồng thời bao nhiêu decode BGRA (thường là điểm nổ khi mesh to).
+    /// `useTemporalSpread` chuyển xuống `capSnapshotsForMaterialize`; atlas path đặt `true`.
     private static func materializeFusionSnapshots(
         current: ARFrame,
         snapshots: [FusionFrameSnapshot],
-        maxStillImageDecode: Int
+        maxStillImageDecode: Int,
+        useTemporalSpread: Bool = false
     ) -> [ColorFusionFrame] {
         let currentTs = current.timestamp
-        let capped = capSnapshotsForMaterialize(currentTs: currentTs, snapshots: snapshots, maxStillImageDecode: maxStillImageDecode)
+        let capped = capSnapshotsForMaterialize(
+            currentTs: currentTs,
+            snapshots: snapshots,
+            maxStillImageDecode: maxStillImageDecode,
+            useTemporalSpread: useTemporalSpread
+        )
         var out: [ColorFusionFrame] = []
         out.reserveCapacity(capped.count + 1)
         var usedLive = false
@@ -1355,7 +1408,7 @@ enum ARMeshExporter {
         return out
     }
 
-    /// Cache fusion đã materialize — **per voxel × frame × patch**; `nearVertex` = tâm vùng để chọn keyframe như polycam-lite.
+    /// Cache fusion đã materialize (**key** = voxel × frame timestamp × patch); `nearVertex` qua centroid voxel để chọn keyframe kiểu Polycam.
     private static func materializedFramesForVertexExport(
         frame: ARFrame,
         preferredPatchID: UUID?,
@@ -1390,7 +1443,24 @@ enum ARMeshExporter {
         selectFusionSnapshots(nearVertex: nil, including: current, preferredPatchID: nil)
     }
 
-    /// Geometry-only OBJ (legacy).
+    /// Toàn bộ history frame sắp theo timestamp — dùng cho pipeline atlas
+    /// để không loại ngầm các frame đầu quét (geometry cũ).
+    /// `bestTextureFusionFrames` sau đó chọn greedy theo spatial coverage trên mọi ứng viên,
+    /// thay vì chỉ tập lọc gần-đỉnh.
+    private static func allHistorySnapshotsForAtlas(current: ARFrame) -> [FusionFrameSnapshot] {
+        guard let fresh = freshCachedFusionSnapshot(for: current) else { return [] }
+        return historyQueue.sync {
+            var all = frameSnapshotHistory
+            let currentTs = current.timestamp
+            if !all.contains(where: { abs($0.timestamp - currentTs) < 1e-4 }) {
+                all.append(fresh)
+            }
+            all.sort { $0.timestamp < $1.timestamp }
+            return all
+        }
+    }
+
+    /// OBJ chỉ geometry (legacy).
     static func buildOBJString(from session: ARSession) -> String? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
@@ -1398,7 +1468,7 @@ enum ARMeshExporter {
         return buildOBJString(from: meshAnchors)
     }
 
-    /// Colored mesh: `v x y z r g b` + optional `vn`, and matching `f v//vn`.
+    /// Mesh có màu: `v x y z r g b` + `vn` tuỳ chọn, và `f v//vn` tương ứng.
     static func buildColoredOBJString(from session: ARSession) -> String? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
@@ -1406,7 +1476,7 @@ enum ARMeshExporter {
         return buildColoredOBJString(meshAnchors: meshAnchors, frame: frame)
     }
 
-    /// PLY ascii with uchar red/green/blue — many viewers show vertex color reliably.
+    /// PLY ascii với uchar R/G/B — nhiều viewer hiển thị vertex colour ổn định.
     static func buildColoredPLYString(from session: ARSession) -> String? {
         guard let frame = session.currentFrame else { return nil }
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
@@ -1414,7 +1484,7 @@ enum ARMeshExporter {
         return buildColoredPLYString(meshAnchors: meshAnchors, frame: frame)
     }
 
-    /// Binary glTF 2.0: per-face color + flat normals — **Xcode Scene Editor shows COLOR_0**; good for “rõ vật thể”.
+    /// Binary glTF 2.0: màu theo face + flat normal — **Xcode Scene Editor hiện `COLOR_0`**; nhìn rõ khối vật thể hơn vertex colour blended.
     static func buildFacetedGLB(
         from session: ARSession,
         profile: ExportProfile = ExportProfile(subject: .room),
@@ -1426,11 +1496,11 @@ enum ARMeshExporter {
         return buildFacetedGLB(meshAnchors: meshAnchors, frame: frame, profile: profile, detailPatches: detailPatches)
     }
 
-    // MARK: - Textured OBJ (Solution B)
+    // MARK: - OBJ có texture (phương án B)
 
-    /// Exports OBJ + MTL + JPEG texture.
-    /// UV is generated by projecting each vertex back to the best fusion ARFrame camera image.
-    /// This is the most universally compatible format — Blender, MeshLab, every viewer reads it correctly.
+    /// Xuất OBJ + MTL + JPEG texture.
+    /// UV sinh bằng cách chiếu mỗi đỉnh về ảnh camera `ARFrame` fusion tốt nhất.
+    /// Định dạng tương thích rộng — Blender, MeshLab và viewer phổ biến đọc ổn.
     struct TexturedOBJBundle {
         let obj: String
         let mtl: String
@@ -1450,7 +1520,11 @@ enum ARMeshExporter {
         let textureDiag = TextureDiag()
         logExportHeader(tag: "TexturedOBJ", frame: frame)
 
-        let snapSelection = selectFusionSnapshots(including: frame)
+        // Dùng FULL history để vùng quét sớm vẫn có ứng viên frame.
+        // `selectFusionSnapshots()` chỉ ~11 frame gần đỉnh khiến đỉnh từ frame ARKit cũ
+        // rơi vào fallback toàn frame hiện tại.
+        let snapSelection = allHistorySnapshotsForAtlas(current: frame)
+        print("[TextureAtlas] History for atlas: \(snapSelection.count) snapshots")
         let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
         guard !preparedMeshes.isEmpty else { return nil }
 
@@ -1541,7 +1615,7 @@ enum ARMeshExporter {
         let codec: FusionSnapshotImageCodec
     }
 
-    /// HEIC-first: entropy coding + larger transform blocks ⇒ ít ringing/blocking JPEG trên ridge/texture nhỏ trong fusion đa khung.
+    /// HEIC trước: entropy coding + block transform lớn hơn → thường ít ringing/blocking của JPEG trên ridge/texture mảnh trong fusion đa khung.
     private static func encodeHEICStillData(cgImage: CGImage, quality: CGFloat) -> Data? {
         let mutable = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(
@@ -1590,7 +1664,7 @@ enum ARMeshExporter {
         return (meshAnchors.count, triangles)
     }
 
-    // MARK: - Plain OBJ
+    // MARK: - OBJ thuần
 
     static func buildOBJString(from meshAnchors: [ARMeshAnchor]) -> String {
         var obj = "# LiDARDepth — ARKit scene mesh export\n"
@@ -1614,7 +1688,7 @@ enum ARMeshExporter {
         return obj
     }
 
-    // MARK: - Colored OBJ + PLY
+    // MARK: - OBJ có màu + PLY
 
     private static func buildColoredOBJString(meshAnchors: [ARMeshAnchor], frame: ARFrame) -> String {
         let diag = ColorDiag()
@@ -1699,7 +1773,7 @@ enum ARMeshExporter {
         }
 
         var ply = "ply\nformat ascii 1.0\n"
-        ply += "comment LiDARDepth — vertex RGB from camera; Laplacian smoothed positions\n"
+        ply += "comment LiDARDepth — RGB đỉnh từ camera; vị trí đã Laplacian mịn\n"
         ply += "element vertex \(positions.count)\n"
         ply += "property float x\nproperty float y\nproperty float z\n"
         ply += "property uchar red\nproperty uchar green\nproperty uchar blue\n"
@@ -1722,7 +1796,7 @@ enum ARMeshExporter {
         return ply
     }
 
-    // MARK: - glTF 2.0 GLB
+    // MARK: - glTF 2.0 (GLB)
 
     private static func buildFacetedGLB(
         meshAnchors: [ARMeshAnchor],
@@ -1770,30 +1844,33 @@ enum ARMeshExporter {
         guard vertexCount > 0, !indicesOut.isEmpty else { return nil }
         diag.printSummary(tag: "GLB")
 
-        // 2 passes of Laplacian colour smoothing at 28% strength.
-        // Pass 1 softens the hard colour discontinuity at anchor boundaries.
-        // Pass 2 diffuses the remaining gradient so transitions are visually seamless.
-        // 28% strength keeps sharp real-world colour edges (e.g. wall-floor junction)
-        // intact while dissolving the 1–2 vertex-wide seam bands.
+        // 2 pass Laplacian màu đỉnh @ ~28%.
+        // Pass 1 làm dịu chỗ discontinuity cứng ở ranh anchor.
+        // Pass 2 khuếch gradient còn lại để chuyển màu mượt mắt.
+        // 28% giữ được mép màu thật (ví dụ chỗ vách-nền),
+        // đồng thời xoá các dải seam chỉ rộng 1–2 đỉnh.
         smoothVertexColors(colors: &colors, indices: indicesOut,
                            vertexCount: vertexCount,
                            passes: profile.glbColorSmoothPasses,
                            strength: profile.glbColorSmoothStrength)
 
+        // Flood-fill đỉnh xám fallback còn lại từ láng giềng đã có màu.
+        // Chạy sau smoothing để màu khuếch vào seam tự nhiên.
+        fillGrayVertexColors(colors: &colors, indices: indicesOut, vertexCount: vertexCount)
+
         return encodeIndexedGLB(positions: positions, normals: normals, colors: colors, indices: indicesOut, vertexCount: vertexCount)
     }
 
-    /// Laplacian color smoothing: blends each vertex colour with its mesh neighbours.
-    /// One pass with strength ≈ 0.20–0.30 is enough to dissolve the hard colour
-    /// discontinuities that appear at ARMeshAnchor boundaries without visibly
-    /// blurring sharp real-world colour edges.
+    /// Laplacian mịn màu: trộn màu đỉnh với láng giềng trên mesh.
+    /// Một pass strength ~0.20–0.30 thường đủ xoá chỗ discontinuity cứng ở ranh anchor
+    /// mà không làm nhòe mép màu thật của scene.
     ///
     /// - Parameters:
-    ///   - colors:      flat [r,g,b, r,g,b, …] Float array, modified in-place.
-    ///   - indices:     triangle index buffer (UInt32 triples).
-    ///   - vertexCount: number of vertices.
-    ///   - passes:      number of smoothing iterations (1 = light, 2 = strong).
-    ///   - strength:    blend factor 0–1 (0 = no change, 1 = full neighbour average).
+    ///   - colors:      mảng phẳng [r,g,b,…], sửa tại chỗ.
+    ///   - indices:     buffer chỉ mục tam giác (bộ ba UInt32).
+    ///   - vertexCount: số đỉnh.
+    ///   - passes:      số lần lặp (1 nhẹ, 2 mạnh).
+    ///   - strength:    hệ số blend 0–1 (0 = giữ nguyên, 1 = TB láng giềng thuần).
     private static func smoothVertexColors(
         colors: inout [Float],
         indices: [UInt32],
@@ -1803,9 +1880,9 @@ enum ARMeshExporter {
     ) {
         guard vertexCount > 0, passes > 0, strength > 0 else { return }
 
-        // Build neighbour lists from the triangle index buffer.
-        // Allowing duplicates is intentional: shared (interior) edges appear twice,
-        // giving them a slightly higher weight — which is geometrically correct.
+        // Dựng danh sách láng giềng từ index tam giác.
+        // Cố ý giữ duplicate: cạnh nội bộ chia sẻ xuất hiện hai lần,
+        // trọng số mép trong hơi cao hơn — đúng về geometry.
         var neighbors: [[Int]] = Array(repeating: [], count: vertexCount)
         for i in stride(from: 0, to: indices.count, by: 3) {
             let i0 = Int(indices[i]), i1 = Int(indices[i + 1]), i2 = Int(indices[i + 2])
@@ -1835,7 +1912,72 @@ enum ARMeshExporter {
         }
     }
 
-    /// glTF 2.0: `ARRAY_BUFFER` / `ELEMENT_ARRAY_BUFFER` (OpenGL ES constants).
+    /// Flood-fill màu từ láng giềng không-xám vào đỉnh vẫn giữ fallback xám 0.45
+    /// sau pipeline projection chính.
+    ///
+    /// Mỗi pass lan màu một bước từ đỉnh đã có màu gần nhất.
+    /// Lặp tới `maxPasses` có thể lấp vùng xám rất rộng nếu topo vẫn nối tới ít nhất một đỉnh có màu.
+    ///
+    /// Heuristic: saturation thấp VÀ luma ~0.45 → coi là "gray fallback".
+    /// Đỉnh thực ra gần xám đó (bê tông trần…) cũng có thể bị fill — đổi lấy bớt artefact.
+    private static func fillGrayVertexColors(
+        colors: inout [Float],
+        indices: [UInt32],
+        vertexCount: Int,
+        maxPasses: Int = 40
+    ) {
+        guard vertexCount > 0, !indices.isEmpty else { return }
+
+        var isGray = [Bool](repeating: false, count: vertexCount)
+        var grayCount = 0
+        for i in 0..<vertexCount {
+            let r = colors[i * 3], g = colors[i * 3 + 1], b = colors[i * 3 + 2]
+            let avg = (r + g + b) / 3
+            let maxDiff = max(abs(r - g), max(abs(g - b), abs(r - b)))
+            if maxDiff < 0.05 && abs(avg - 0.45) < 0.10 {
+                isGray[i] = true
+                grayCount += 1
+            }
+        }
+        guard grayCount > 0 else { return }
+        let initialGray = grayCount
+
+        var neighbors: [[Int]] = Array(repeating: [], count: vertexCount)
+        for i in stride(from: 0, to: indices.count, by: 3) {
+            let a = Int(indices[i]), b = Int(indices[i + 1]), c = Int(indices[i + 2])
+            neighbors[a].append(b); neighbors[a].append(c)
+            neighbors[b].append(a); neighbors[b].append(c)
+            neighbors[c].append(a); neighbors[c].append(b)
+        }
+
+        for _ in 0..<maxPasses {
+            var anyFilled = false
+            for i in 0..<vertexCount {
+                guard isGray[i] else { continue }
+                var sumR: Float = 0, sumG: Float = 0, sumB: Float = 0
+                var count = 0
+                for n in neighbors[i] where !isGray[n] {
+                    sumR += colors[n * 3]
+                    sumG += colors[n * 3 + 1]
+                    sumB += colors[n * 3 + 2]
+                    count += 1
+                }
+                guard count > 0 else { continue }
+                colors[i * 3]     = sumR / Float(count)
+                colors[i * 3 + 1] = sumG / Float(count)
+                colors[i * 3 + 2] = sumB / Float(count)
+                isGray[i] = false
+                grayCount -= 1
+                anyFilled = true
+            }
+            if !anyFilled { break }
+        }
+
+        let filled = initialGray - grayCount
+        print("[GrayFill] \(filled)/\(initialGray) vertices filled; \(grayCount) isolated (no coloured neighbour).")
+    }
+
+    /// glTF 2.0: hằng OpenGL ES `ARRAY_BUFFER` / `ELEMENT_ARRAY_BUFFER`.
     private static let gltfArrayBuffer: Int = 34962
     private static let gltfElementArrayBuffer: Int = 34963
 
@@ -1880,9 +2022,8 @@ enum ARMeshExporter {
         let p1 = p0 + normData.count
         let p2 = p1 + colorData.count
 
-        // KHR_materials_unlit: display vertex colors directly without PBR lighting.
-        // Without this extension, PBR with roughness=1 and no IBL environment makes
-        // the mesh appear dark/black in most viewers even when vertex colors are correct.
+        // KHR_materials_unlit: hiển thị vertex colour không qua chiếu sáng PBR.
+        // Không có extension này, PBR roughness=1 + không IBL làm mesh tối/đen ở hầu hết viewer dù RGB đỉnh đúng.
         let json: String = """
         {"asset":{"version":"2.0","generator":"LiDARDepth"},"extensionsUsed":["KHR_materials_unlit"],"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"COLOR_0":2},"indices":3,"material":0}]}],"materials":[{"doubleSided":true,"extensions":{"KHR_materials_unlit":{}},"pbrMetallicRoughness":{"baseColorFactor":[1,1,1,1]}}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(colorData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p2),"byteLength":\(indexData.count),"target":\(gltfElementArrayBuffer)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5121,"normalized":true,"count":\(vertexCount),"type":"VEC4"},{"bufferView":3,"componentType":5125,"count":\(indices.count),"type":"SCALAR"}]}
         """
@@ -1915,7 +2056,7 @@ enum ARMeshExporter {
         return out
     }
 
-    // MARK: - Geometry
+    // MARK: - Geometry helpers
 
     private static func worldVertexPositions(geometry: ARMeshGeometry, transform: simd_float4x4) -> [SIMD3<Float>] {
         let source = geometry.vertices
@@ -1986,24 +2127,22 @@ enum ARMeshExporter {
     }
 
     private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
-        // Merge all anchors into one combined mesh before smoothing.
-        // This lets bilateral smoothing work across anchor boundaries and
-        // vertex welding closes the seam gaps that appear as black lines.
+        // Gộp mọi anchor thành một mesh trước khi mịn.
+        // Giúp Laplacian/bilateral không bị cắt ở ranh anchor và
+        // weld đỉnh bịt các kẽ đen giữa chunk.
         var allPositions: [SIMD3<Float>] = []
         var allIndices: [UInt32] = []
         var vertexOffset: UInt32 = 0
 
-        // 1. Prepend geometry from all frozen blocks (block-scan mode).
-        //    These snapshots are stable — they don't change even if ARKit
-        //    removes or updates the corresponding anchors later.
+        // 1. Nối trước geometry từ mọi frozen block (chế độ block).
+        //    Snapshot cố định — không đổi dù sau này ARKit xóa/cập nhật anchor đó.
         for block in frozenBlocks {
             allPositions.append(contentsOf: block.positions)
             allIndices.append(contentsOf: block.indices.map { $0 + vertexOffset })
             vertexOffset += UInt32(block.positions.count)
         }
 
-        // 2. Append live ARMeshAnchor data — skip any anchor whose geometry has
-        //    already been committed to a frozen block to avoid double-counting.
+        // 2. Ghép anchor live — bỏ anchor đã được commit vào frozen block để khỏi đếm đôi.
         let frozenIDs = frozenAnchorIDs
         for anchor in meshAnchors where !frozenIDs.contains(anchor.identifier) {
             let verts   = worldVertexPositions(geometry: anchor.geometry, transform: anchor.transform)
@@ -2015,10 +2154,10 @@ enum ARMeshExporter {
 
         guard !allPositions.isEmpty else { return [] }
 
-        // Weld vertices within 5 mm to seal anchor-boundary seams.
+        // Hàn đỉnh trong ≤5 mm để bịt khớp mép anchor.
         MeshLaplacianSmooth.weldVertices(positions: &allPositions, triangleIndices: &allIndices, epsilon: 0.005)
 
-        // Smooth + hole-fill on the unified mesh (cross-boundary neighbours now exist).
+        // Mịn + lấp lỗ trên mesh thống nhất (đã có láng giềng xuyên ranh).
         MeshLaplacianSmooth.smooth(positions: &allPositions, triangleIndices: allIndices)
         MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &allPositions, triangleIndices: &allIndices)
 
@@ -2158,7 +2297,17 @@ enum ARMeshExporter {
         }
     }
 
-    /// Chọn vài fusion frame làm ô trong atlas — chỉ materialize adapters, không `[ARFrame]`.
+    /// Chọn fusion frame cho atlas: greedy spatial coverage để không toàn bọc hướng nhìn gần (tránh đỉnh quét trước bị grey).
+    ///
+    /// Cách cũ: chấm điểm frame toàn cục rồi lấy top-N.
+    /// Vấn đề: top-N thường toàn bọc hướng nhìn *hiện tại*; đỉnh quét trước từ góc xa
+    /// không có tile atlas → xám.
+    ///
+    /// Cách mới:
+    /// 1. Materialize với temporal spread (không chỉ sort nét đầu tiên) để frame đầu quét còn sống.
+    /// 2. Tiền tính từng frame che được điểm mẫu nào.
+    /// 3. Greedy: chọn frame phủ nhiều điểm *chưa che* nhất rồi lặp.
+    /// Giúp mọi vùng không gian của mesh ít nhất có một tile atlas.
     private static func bestTextureFusionFrames(
         snapshots: [FusionFrameSnapshot],
         current: ARFrame,
@@ -2169,74 +2318,140 @@ enum ARMeshExporter {
         let mergedSnapsUnsorted = mergedCandidateSnapshots(baseSnapshots: snapshots, detailPatches: detailPatches)
         let mergedSnaps = mergedSnapsUnsorted.sorted { $0.timestamp < $1.timestamp }
 
+        // Sub-sample nếu quá đông nhưng vẫn rải timeline để miền cũ và mới đều còn ứng viên.
         let snapsForMaterialize: [FusionFrameSnapshot]
-        if mergedSnaps.count > 48 {
-            let step = max(1, mergedSnaps.count / 48)
+        if mergedSnaps.count > 60 {
+            let step = max(1, mergedSnaps.count / 60)
             snapsForMaterialize = stride(from: 0, to: mergedSnaps.count, by: step).map { mergedSnaps[$0] }
         } else {
             snapsForMaterialize = mergedSnaps
         }
 
+        // Temporal spread chia ngân sách decode đều khắp timeline quét.
         let materialized = materializeFusionSnapshots(
             current: current,
             snapshots: snapsForMaterialize,
-            maxStillImageDecode: maxDecodedBGRAAtlas
+            maxStillImageDecode: maxDecodedBGRAAtlas,
+            useTemporalSpread: true
         )
 
         let allPoints = preparedMeshes.flatMap { $0.positions }
-        let samplePoints = allPoints.enumerated().compactMap { idx, p in
+        // Một điểm / ~18 đỉnh để bước check coverage không nổ chi phí (O(số frame × mẫu)).
+        let samplePoints = allPoints.enumerated().compactMap { idx, p -> SIMD3<Float>? in
             idx % 18 == 0 ? p : nil
         }
         guard !samplePoints.isEmpty else {
             return materialized.isEmpty ? [ARFrameFusionAdapter(current)] : materialized
         }
 
-        let effectiveAtlasCount = max(profile.atlasFrameCount, detailPatches.isEmpty ? 0 : ExportProfile(subject: .ultraDetailObject).atlasFrameCount)
+        let effectiveAtlasCount = max(
+            profile.atlasFrameCount,
+            detailPatches.isEmpty ? 0 : ExportProfile(subject: .ultraDetailObject).atlasFrameCount
+        )
         let patchCenters = detailPatches.map(\.center)
-        let patchRadii = detailPatches.map(\.radius)
+        let patchRadii  = detailPatches.map(\.radius)
 
-        let scored = materialized.enumerated().map { frameOrder, fus -> (ColorFusionFrame, Float) in
+        // ── Bước 1: tiền tính coverage từng frame (điểm mẫu nào frame đó nhìn thấy) ──
+        // Và điểm score chất lượng điểm mẫu (mép × trọng số trung tâm / depth²).
+        var frameCoveredPoints: [[Int]] = []
+        var frameCoverageQuality: [[Float]] = []
+        frameCoveredPoints.reserveCapacity(materialized.count)
+        frameCoverageQuality.reserveCapacity(materialized.count)
+
+        for fus in materialized {
+            var covered: [Int] = []
+            var qualities: [Float] = []
+            covered.reserveCapacity(samplePoints.count / 3)
+            qualities.reserveCapacity(samplePoints.count / 3)
             let camPos = cameraPosition(fusion: fus)
             let pb = fus.fusionCapturedImage
             let w = CVPixelBufferGetWidth(pb)
             let h = CVPixelBufferGetHeight(pb)
-            var score: Float = 0
-            var hits = 0
 
-            for sp in samplePoints {
+            for (idx, sp) in samplePoints.enumerated() {
                 let localProfile = profileForPosition(sp, baseProfile: profile, detailPatches: detailPatches)
-                let normal = simd_normalize(camPos - sp)
+                let viewDir = simd_normalize(camPos - sp)
                 guard let pt = textureCoordinatePointFusion(
                     worldPosition: sp,
-                    normal: normal,
+                    normal: viewDir,
                     fusion: fus,
                     profile: localProfile,
                     allowRelaxedFallback: false,
                     diag: nil
                 ) else { continue }
                 let depth = simd_distance(camPos, sp)
-                let border = imageBorderWeight(point: pt, width: w, height: h)
-                let center = centerWeight(point: pt, width: w, height: h, bias: localProfile.centerBias)
-                score += border * center * (1.0 / (1.0 + 0.35 * depth * depth))
-                hits += 1
+                let border  = imageBorderWeight(point: pt, width: w, height: h)
+                let center  = centerWeight(point: pt, width: w, height: h, bias: localProfile.centerBias)
+                let quality = border * center * (1.0 / (1.0 + 0.35 * depth * depth))
+                if quality > 0.04 {
+                    covered.append(idx)
+                    qualities.append(quality)
+                }
             }
-
-            for (idx, centerPos) in patchCenters.enumerated() {
-                let d = simd_distance(camPos, centerPos)
-                let patchRadius = idx < patchRadii.count ? patchRadii[idx] : 0.7
-                let proximity = max(0, 1 - d / max(patchRadius * 2.5, 0.25))
-                score += 1.1 * proximity
-                score += 0.7 / (1.0 + 0.6 * d * d)
-            }
-
-            score += Float(hits) * 0.15
-            score += Float(frameOrder) * 0.03
-            return (fus, score)
+            frameCoveredPoints.append(covered)
+            frameCoverageQuality.append(qualities)
         }
 
-        let sorted = scored.sorted { $0.1 > $1.1 }
-        let take = max(1, effectiveAtlasCount)
-        return sorted.prefix(take).map { $0.0 }
+        // ── Bước 2: greedy set-cover — chọn frame tối đa hoá điểm mẫu *chưa* được che ──
+        var selectedIndices: [Int] = []
+        var alreadyCovered = Set<Int>()
+
+        for _ in 0..<min(effectiveAtlasCount, materialized.count) {
+            var bestFrameIdx = -1
+            var bestNewCoverage = 0
+            var bestQualitySum: Float = 0
+
+            for (fi, coveredList) in frameCoveredPoints.enumerated() {
+                guard !selectedIndices.contains(fi) else { continue }
+                var newCount = 0
+                var qualSum: Float = 0
+                for (k, ptIdx) in coveredList.enumerated() {
+                    if !alreadyCovered.contains(ptIdx) {
+                        newCount += 1
+                        qualSum += frameCoverageQuality[fi][k]
+                    }
+                }
+                if newCount > bestNewCoverage
+                    || (newCount == bestNewCoverage && qualSum > bestQualitySum) {
+                    bestNewCoverage = newCount
+                    bestQualitySum = qualSum
+                    bestFrameIdx = fi
+                }
+            }
+
+            // Dừng khi không frame nào thêm được coverage.
+            guard bestFrameIdx >= 0, bestNewCoverage > 0 else { break }
+            selectedIndices.append(bestFrameIdx)
+            for ptIdx in frameCoveredPoints[bestFrameIdx] {
+                alreadyCovered.insert(ptIdx)
+            }
+        }
+
+        // ── Bước 3: bonus gần detail patch — chắc chắn có frame của vùng chi tiết ──
+        if !patchCenters.isEmpty {
+            for (fi, fus) in materialized.enumerated() {
+                guard !selectedIndices.contains(fi), selectedIndices.count < effectiveAtlasCount else { break }
+                let camPos = cameraPosition(fusion: fus)
+                for (pidx, centerPos) in patchCenters.enumerated() {
+                    let patchRadius = pidx < patchRadii.count ? patchRadii[pidx] : 0.7
+                    if simd_distance(camPos, centerPos) < patchRadius * 2.0 {
+                        selectedIndices.append(fi)
+                        break
+                    }
+                }
+            }
+        }
+
+        // ── Fallback greedy rỗng: giữ N frame đầu theo thứ tự thời gian ──
+        if selectedIndices.isEmpty {
+            print("[TextureAtlas] Greedy coverage: 0 useful frames — falling back to first \(effectiveAtlasCount).")
+            return Array(materialized.prefix(effectiveAtlasCount))
+        }
+
+        let pct = samplePoints.isEmpty ? 0 : Int(Float(alreadyCovered.count) / Float(samplePoints.count) * 100)
+        print("[TextureAtlas] Greedy coverage: \(selectedIndices.count) atlas frames → \(alreadyCovered.count)/\(samplePoints.count) sample pts (\(pct)%)")
+
+        return selectedIndices.map { materialized[$0] }
     }
 
     private static func buildTextureAtlas(from frames: [ColorFusionFrame], quality: CGFloat) -> TextureAtlas? {
@@ -2302,7 +2517,7 @@ enum ARMeshExporter {
         return out
     }
 
-    // MARK: - Camera coloring
+    // MARK: - Tô màu từ camera
 
     private static func activeInterfaceOrientation() -> UIInterfaceOrientation {
         guard let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
@@ -2311,9 +2526,10 @@ enum ARMeshExporter {
         return scene.interfaceOrientation
     }
 
-    // MARK: - Projection (intrinsics / imageResolution → capturedImage pixel coords)
+    // MARK: - Chiếu (intrinsics/imageResolution → tọa độ pixel `capturedImage`)
 
-    /// World ↔ buffer bug class: **`ARCamera.projectPoint`/`intrinsics`** live in `imageResolution` space while sampling uses **`CVPixelBufferGetWidth`**; portrait UI often **transpose** WxH vs YUV plane.
+    /// Hay lệch world↔buffer: `ARCamera.projectPoint`/intrinsics ở không gian `imageResolution`,
+    /// còn sample dùng `CVPixelBufferGetWidth`; UI portrait thường **transpose** WxH so với plane YUV.
     private static func mapCalibrationPointToCaptureBufferPixels(
         pointCalibration: CGPoint,
         calibrationSize ref: CGSize,
@@ -2379,7 +2595,7 @@ enum ARMeshExporter {
         return nil
     }
 
-    /// Multi-frame weighted colour fusion (`ColorFusionFrame` adapters — không giữ ARFrame trong lịch sử).
+    /// Blend màu đa khung qua các `ColorFusionFrame` adapter; history không stash `ARFrame`.
     private static func sampleCameraColor(worldPosition: SIMD3<Float>, worldNormal: SIMD3<Float>?, frame: ARFrame, diag: ColorDiag? = nil) -> SIMD3<Float> {
         sampleCameraColor(
             worldPosition: worldPosition,
@@ -2492,6 +2708,61 @@ enum ARMeshExporter {
             let enhanced = enhanceSampledColor(finalColor, profile: profile)
             diag?.recordResolvedColor(enhanced)
             return enhanced
+        }
+
+        // ── Pass 3 — "đường cùng": nới gate độ nét nhưng vẫn depth check rộng ──
+        // Depth với relaxTolerance=true để hạn chế bleed màu từ background
+        // (ví dụ tường trắng sau vật có màu).
+        do {
+            var bestColor: SIMD3<Float>? = nil
+            var bestFacing: Float = -1
+            for f in materialized {
+                let invT = f.fusionCameraTransform.inverse
+                let camLocal = invT * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
+                guard camLocal.z < -0.01 else { continue }
+                guard let projected = projectWorldToImagePixel(worldPosition: worldPosition, fusion: f) else { continue }
+                let camPos = cameraPosition(fusion: f)
+                let toCam = simd_normalize(camPos - worldPosition)
+                let dist = simd_distance(camPos, worldPosition)
+                let facing: Float
+                if let n = worldNormal {
+                    facing = simd_dot(simd_normalize(n), toCam)
+                } else {
+                    facing = 0.1
+                }
+                guard facing > -0.15 else { continue }
+                let pb = f.fusionCapturedImage
+                let w = CVPixelBufferGetWidth(pb)
+                let h = CVPixelBufferGetHeight(pb)
+                let frontalDepth01 = simd_clamp(simd_max(0, facing), 0, 1)
+                // Depth loose — tránh màu nền xuyên qua geometry foreground.
+                if let dm = f.fusionDepthMap {
+                    guard projectionDepthOcclusionPasses(
+                        depthMap: dm, projected: projected,
+                        imageWidth: w, imageHeight: h,
+                        geometricDepth: dist, surfaceFrontal01: frontalDepth01,
+                        profile: profile, relaxTolerance: true
+                    ) else { continue }
+                } else if let mini = f.fusionPackedMiniDepth {
+                    guard projectionMiniDepthOcclusionPasses(
+                        mini: mini, projected: projected,
+                        imageWidth: w, imageHeight: h,
+                        geometricDepth: dist, surfaceFrontal01: frontalDepth01,
+                        profile: profile, relaxTolerance: true
+                    ) else { continue }
+                }
+                let sampled = sampleRGB3x3(pixelBuffer: pb, at: projected, width: w, height: h)
+                if facing > bestFacing {
+                    bestFacing = facing
+                    bestColor = sampled
+                }
+            }
+            if let color = bestColor {
+                diag?.countColor()
+                let enhanced = enhanceSampledColor(color, profile: profile)
+                diag?.recordResolvedColor(enhanced)
+                return enhanced
+            }
         }
 
         diag?.countZeroWeight()
@@ -2611,22 +2882,13 @@ enum ARMeshExporter {
             return nil
         }
 
-        var sampled = sampleRGB3x3(pixelBuffer: pb, at: projected, width: w, height: h)
-        let y0 = luma01FromRGB(sampled)
-        let y1 = FusionLumaHistogram.matchLuma(y0, cdfSource: frame.fusionLumaCDF, cdfRef: referenceLumaCDF)
-        let scaleHist = y1 / max(y0, 1e-4)
-        sampled = simd_clamp(sampled * scaleHist, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
-
-        let cx = min(max(projected.x, 0), CGFloat(max(w - 1, 0)))
-        let cy = min(max(projected.y, 0), CGFloat(max(h - 1, 0)))
-        let centerTap = sampleRGBAtImage(pixelBuffer: pb, x: cx, y: cy, width: w, height: h)
-        let edgeGate = simd_clamp(sobelMag * 11.0, 0, 1)
-        let kSharpen = profile.fusionMicroContrastStrength * (Float(0.26) + Float(0.74) * edgeGate)
-        sampled = simd_clamp(sampled + kSharpen * (centerTap - sampled), SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
+        // Lấy mẫu RGB thô — không histogram match, không sharpen micro-contrast.
+        // Giữ đúng màu máy đã capture.
+        let sampled = sampleRGB3x3(pixelBuffer: pb, at: projected, width: w, height: h)
 
         if worldNormal != nil, ndotl < -0.80 { diag?.countBackface() }
 
-        // Production-weight: sharp * frontal^2 * exp(-k d^2) × edge-aware × heuristic bonuses.
+        // Trọng số fusion: sharp × frontal² × exp(−k·d²) × edge-aware × các bonus heuristic.
         let frontal = simd_max(0, ndotl)
         let angularW = frontal * frontal
         let sharpW = max(frame.fusionImageSharpness01, Float(1e-4))
@@ -2652,7 +2914,7 @@ enum ARMeshExporter {
         return SIMD3<Float>(c.x, c.y, c.z)
     }
 
-    /// Depth/occlusion: median 3×3 trên LiDAR depth so với khoảng cách geometrictheo ray — lọc trọng lực/occlusion sai (nguồn blur chính).
+    /// Depth/occlusion gate: median 3×3 trên LiDAR depth đối chiếu khoảng cách geometric dọc ray projection — reject weight/occlusion sai (blur chính khi sai).
     private static func projectionDepthOcclusionPasses(
         depthMap: CVPixelBuffer,
         projected: CGPoint,
@@ -2703,7 +2965,7 @@ enum ARMeshExporter {
         return true
     }
 
-    /// Cùng logic tolerance nhưng trên coarse depth pack (historical snapshots).
+    /// Cùng ý tolerance nhưng chạy trên coarse depth pack từ snapshot cũ (frame JPEG trong history không có full LiDAR map).
     private static func projectionMiniDepthOcclusionPasses(
         mini: FusionPackedMiniDepth,
         projected: CGPoint,
@@ -2757,11 +3019,11 @@ enum ARMeshExporter {
         return true
     }
 
-    /// 3×3 Gaussian kernel (9 taps, pre-normalised weights sum to 1.0).
-    /// More accurate than the old 5-tap uniform average: corners contribute less,
-    /// centre dominates → sharper result with better noise suppression.
+    /// Kernel Gaussian 3×3 (9 mẫu, trọng số chuẩn hoá tổng 1).
+    /// Chính hơn trung bình đều 5 mẫu cũ: góc đóng góp ít hơn,
+    /// tâm chủ đạo → chi tiết sắc hơn và nén noise tốt hơn.
     private static func sampleRGB3x3(pixelBuffer: CVPixelBuffer, at p: CGPoint, width: Int, height: Int) -> SIMD3<Float> {
-        // (dx, dy, weight)  — Gaussian weights: centre=0.25, edge=0.125, corner=0.0625
+        // (dx, dy, weight) — trọng Gaussian: tâm=0.25, cạnh=0.125, góc=0.0625
         let taps: [(CGFloat, CGFloat, Float)] = [
             (-1, -1, 0.0625), (0, -1, 0.125), (1, -1, 0.0625),
             (-1,  0, 0.125),  (0,  0, 0.25),  (1,  0, 0.125),
@@ -2781,7 +3043,7 @@ enum ARMeshExporter {
         simd_dot(c, SIMD3<Float>(0.2126, 0.7152, 0.0722))
     }
 
-    /// Luma tại ô ảnh gần nearest (để Sobel không phụ thuộc kernel bilinear của sampleRGB đứng riêng).
+    /// Luma NN tại ô pixel lattice (decouple Sobel khỏi bilinear của `sampleRGB`/sample colour path).
     private static func luma01AtLatticePixel(pixelBuffer: CVPixelBuffer, x: Int, y: Int, width: Int, height: Int) -> Float {
         let xi = min(max(x, 0), max(width - 1, 0))
         let yi = min(max(y, 0), max(height - 1, 0))
@@ -2789,7 +3051,7 @@ enum ARMeshExporter {
         return simd_clamp(luma01FromRGB(c), 0, 1)
     }
 
-    /// Edge-aware multiplier: Sobel magnitude trên luma — dùng cùng số học như multiplier để không tính Sobel hai lần ở `evaluateFrameColor`.
+    /// Sobel magnitude trên luma (core edge‑aware multiplier) — tái dùng toán với `fusionEdgeBoostMultiplier`, tránh tính Sobel hai lần.
     private static func fusionSobelLumaMagnitude(
         pixelBuffer: CVPixelBuffer,
         at projected: CGPoint,
@@ -2812,7 +3074,7 @@ enum ARMeshExporter {
         return hypot(gx, gy)
     }
 
-    /// Edge-aware multiplier: Sobel magnitude trên luma — tăng weight ở cạnh / texture high‑frequency.
+    /// Sobel magnitude trên luma → bump weight chỗ mép/high‑frequency texture (kết hợp `fusionEdgeBoostScale`).
     private static func fusionEdgeBoostMultiplier(
         pixelBuffer: CVPixelBuffer,
         at projected: CGPoint,
@@ -2831,7 +3093,7 @@ enum ARMeshExporter {
         let nx = min(max(point.x / w, 0), 1)
         let ny = min(max(point.y / h, 0), 1)
         let edgeDistance = min(min(nx, 1 - nx), min(ny, 1 - ny))
-        // Giảm phạt ở biên để giữ màu cho nhiều vertex hơn.
+        // Giảm penalty mép khung để vẫn giữ được màu cho nhiều vertex trong bounds.
         let t = max(0, min(1, edgeDistance / 0.05))
         return Float(0.45 + 0.55 * t)
     }
@@ -2856,7 +3118,31 @@ enum ARMeshExporter {
         profile: ExportProfile,
         diag: TextureDiag? = nil
     ) -> TextureProjection? {
+        func scoreProjection(
+            fus: ColorFusionFrame,
+            pt: CGPoint,
+            idx: Int,
+            relaxedPenalty: Float
+        ) -> Float {
+            let camPos = cameraPosition(fusion: fus)
+            let toCamera = camPos - worldPosition
+            let depth = simd_length(toCamera)
+            let pb = fus.fusionCapturedImage
+            let w = CVPixelBufferGetWidth(pb)
+            let h = CVPixelBufferGetHeight(pb)
+            let border  = imageBorderWeight(point: pt, width: w, height: h)
+            let center  = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
+            let depthW  = 1.0 / (1.0 + 0.25 * depth * depth)
+            // Góc facing: máy nhìn thẳng mặt bao nhiêu.
+            let nn = simd_normalize(normal)
+            let vd = depth > 1e-5 ? toCamera / depth : nn
+            let ndotv = simd_clamp(simd_dot(nn, vd), 0, 1)
+            let facingW = 0.3 + 0.7 * ndotv  // [0.3 … 1.0]: gần grazing vẫn dùng được
+            return relaxedPenalty * border * center * depthW * facingW + Float(idx) * 0.005
+        }
+
         var best: TextureProjection?
+
         for (idx, fus) in frames.enumerated() {
             guard let pt = textureCoordinatePointFusion(
                 worldPosition: worldPosition,
@@ -2866,21 +3152,12 @@ enum ARMeshExporter {
                 allowRelaxedFallback: false,
                 diag: diag
             ) else { continue }
-            let camPos = cameraPosition(fusion: fus)
-            let depth = simd_distance(camPos, worldPosition)
-            let pb = fus.fusionCapturedImage
-            let w = CVPixelBufferGetWidth(pb)
-            let h = CVPixelBufferGetHeight(pb)
-            let border = imageBorderWeight(point: pt, width: w, height: h)
-            let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
-            let score = border * center * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.01
+            let score = scoreProjection(fus: fus, pt: pt, idx: idx, relaxedPenalty: 1.0)
             if best == nil || score > best!.score {
                 best = TextureProjection(frameIndex: idx, point: pt, score: score, isRelaxed: false)
             }
         }
-        if best != nil {
-            return best
-        }
+        if best != nil { return best }
 
         for (idx, fus) in frames.enumerated() {
             guard let pt = textureCoordinatePointFusion(
@@ -2891,14 +3168,7 @@ enum ARMeshExporter {
                 allowRelaxedFallback: true,
                 diag: nil
             ) else { continue }
-            let camPos = cameraPosition(fusion: fus)
-            let depth = simd_distance(camPos, worldPosition)
-            let pb = fus.fusionCapturedImage
-            let w = CVPixelBufferGetWidth(pb)
-            let h = CVPixelBufferGetHeight(pb)
-            let border = imageBorderWeight(point: pt, width: w, height: h)
-            let center = centerWeight(point: pt, width: w, height: h, bias: profile.centerBias)
-            let score = 0.55 * border * center * (1.0 / (1.0 + 0.25 * depth * depth)) + Float(idx) * 0.005
+            let score = scoreProjection(fus: fus, pt: pt, idx: idx, relaxedPenalty: 0.55)
             if best == nil || score > best!.score {
                 best = TextureProjection(frameIndex: idx, point: pt, score: score, isRelaxed: true)
             }
@@ -3009,9 +3279,9 @@ enum ARMeshExporter {
         return pt
     }
 
-    /// Sigmoid S-curve: maps [0,1]→[0,1] preserving 0.0 and 1.0 as fixed points.
-    /// strength > 1  →  steeper S (more contrast pop).
-    /// strength = 1  →  linear pass-through.
+    /// Sigmoide dạng S: [0,1]→[0,1], giữ 0 và 1 cố định.
+    /// strength > 1 → S dốc hơn (độ tương phản punch hơn).
+    /// strength = 1 → gần đường thẳng.
     @inline(__always)
     private static func sCurveContrast(_ x: Float, strength: Float) -> Float {
         let v = (x - 0.5) * strength
@@ -3019,39 +3289,9 @@ enum ARMeshExporter {
     }
 
     private static func enhanceSampledColor(_ color: SIMD3<Float>, profile: ExportProfile) -> SIMD3<Float> {
-        // 1. Saturation — simple linear boost around luma, preserving luminance.
-        //    No vibrance/vibrancy: it over-pushes near-grey surfaces (walls, ceiling)
-        //    into artificially coloured results that don't match reality.
-        let luma = simd_dot(color, SIMD3<Float>(0.2126, 0.7152, 0.0722))
-        let gray = SIMD3<Float>(repeating: luma)
-        let saturated = simd_clamp(gray + (color - gray) * profile.saturationBoost,
-                                   SIMD3<Float>(0), SIMD3<Float>(1))
-
-        // 2. Gentle S-curve contrast — mild, just to add a touch of pop.
-        let s = profile.contrastBoost
-        let curved = SIMD3<Float>(
-            sCurveContrast(saturated.x, strength: s),
-            sCurveContrast(saturated.y, strength: s),
-            sCurveContrast(saturated.z, strength: s)
-        )
-
-        let lfMid = simd_dot(curved, SIMD3<Float>(0.2126, 0.7152, 0.0722))
-        let midGate = simd_clamp(Float(1.12) - abs(lfMid - Float(0.445)) / Float(0.62), Float(0), Float(1))
-        let ripple = profile.postFusionLocalContrastRipple * midGate
-        let tonal = SIMD3<Float>(
-            simd_clamp(curved.x + (curved.x - lfMid) * ripple, Float(0), Float(1)),
-            simd_clamp(curved.y + (curved.y - lfMid) * ripple, Float(0), Float(1)),
-            simd_clamp(curved.z + (curved.z - lfMid) * ripple, Float(0), Float(1))
-        )
-
-        // 3. Gamma — stay close to 1.0 so light-coloured surfaces stay accurate.
-        let gamma = profile.gammaCorrection
-        let corrected = SIMD3<Float>(
-            pow(tonal.x, gamma),
-            pow(tonal.y, gamma),
-            pow(tonal.z, gamma)
-        )
-        return simd_clamp(corrected, SIMD3<Float>(0), SIMD3<Float>(1))
+        // Chỗ này tắt color enhancement — trả đúng màu camera.
+        // Trước đây từng bật boost S-curve/ripple/gamma nhưng dễ wash-out hay oversat.
+        return simd_clamp(color, SIMD3<Float>(repeating: 0), SIMD3<Float>(repeating: 1))
     }
 
     private static func sampleDepthBilinear(pixelBuffer: CVPixelBuffer, x: CGFloat, y: CGFloat, width: Int, height: Int) -> Float? {
@@ -3101,8 +3341,8 @@ enum ARMeshExporter {
         return nil
     }
 
-    /// World → pixel trong **capture buffer** của `frame.capturedImage` (≠ UI displayTransform).
-    /// Bug trước: kiểm biên qua `imageResolution`/`projectPoint(viewport)` rồi sample theo WxH của `CVPixelBuffer` khác transpose/scale ⇒ ~OOB artefact cực lớn.
+    /// World → pixel **trực tiếp trên capture buffer** `frame.capturedImage` (≠ displayTransform của UI preview).
+    /// Bug đã có: clamp theo `imageResolution`/`projectPoint(viewport)` rồi sample như WxH `CVPixelBuffer` — lệch transpose/scale → OOB + artefact nặng.
     private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, frame: ARFrame) -> CGPoint? {
         let camera = frame.camera
 
@@ -3170,7 +3410,7 @@ enum ARMeshExporter {
         return nil
     }
 
-    /// Adapter fusion không có ARCamera → pinhole trong domain intrinsics/`imageResolution` rồi map sang WxH của buffer đích.
+    /// Adapter fusion không có `ARCamera` live → project pinhole trong domain intrinsics/`imageResolution`, rồi map vào WxH buffer decode.
     private static func projectWorldToImagePixel(worldPosition: SIMD3<Float>, fusion frame: ColorFusionFrame) -> CGPoint? {
         let camPt = frame.fusionCameraTransform.inverse * SIMD4<Float>(worldPosition.x, worldPosition.y, worldPosition.z, 1)
         if camPt.z > -0.01 { return nil }
@@ -3209,9 +3449,10 @@ enum ARMeshExporter {
         return nil
     }
 
-    /// Log thông tin frame và pixel format trước khi export.
+    /// Log một dòng header: pixel format và kích buffer trước khi vào luồng export.
     private static func logExportHeader(tag: String, frame: ARFrame) {
         let fusionCount = selectFusionSnapshots(including: frame).count
+        let historyCount = historyQueue.sync { frameSnapshotHistory.count }
         let pb = frame.capturedImage
         let fmt = CVPixelBufferGetPixelFormatType(pb)
         let fmtName: String
@@ -3227,6 +3468,7 @@ enum ARMeshExporter {
         let K = frame.camera.intrinsics
         print("""
 [ColorDiag] --- \(tag) Export bắt đầu ---
+  History size   : \(historyCount) snapshots (max \(maxHistorySnapshots))
   Fusion frames  : \(fusionCount)
   Pixel format   : \(fmtName)
   Buffer size    : \(imgW) x \(imgH)
