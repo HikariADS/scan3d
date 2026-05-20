@@ -728,6 +728,7 @@ struct LiDARMeshScanContainer: View {
 
     var isTabActive: Bool
     var prepareForAR: () -> Void
+    var onDismiss: (() -> Void)? = nil
 
     // Scan mode
     @State private var scanCategory: ScanCategory = .area
@@ -819,6 +820,16 @@ struct LiDARMeshScanContainer: View {
     private var topBar: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
+                if let onDismiss {
+                    Button(action: onDismiss) {
+                        Image(systemName: "chevron.left")
+                            .font(.body.weight(.semibold))
+                            .frame(width: 38, height: 38)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                    }
+                }
+
                 // Mode capsule selector
                 HStack(spacing: 2) {
                     ForEach(ScanCategory.allCases) { cat in

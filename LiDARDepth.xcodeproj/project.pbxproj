@@ -29,6 +29,7 @@
 		C4FF06792D722C9300B68C9A /* MeshLaplacianSmooth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06782D722C9300B68C9A /* MeshLaplacianSmooth.swift */; };
 		C4FF06762D722C9300B68C9A /* LiDARMeshScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */; };
 		C4FF06772D722C9300B68C9A /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06742D722C9300B68C9A /* MainTabView.swift */; };
+		C4FF067B2D722C9300B68C9A /* ScannerHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */; };
 		D1E8A0122D722C9300B68C9A /* ARKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0102D722C9300B68C9A /* ARKit.framework */; };
 		D1E8A0132D722C9300B68C9A /* RealityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0112D722C9300B68C9A /* RealityKit.framework */; };
 /* End PBXBuildFile section */
@@ -60,6 +61,7 @@
 		C4FF06782D722C9300B68C9A /* MeshLaplacianSmooth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MeshLaplacianSmooth.swift; sourceTree = "<group>"; };
 		C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARMeshScanView.swift; sourceTree = "<group>"; };
 		C4FF06742D722C9300B68C9A /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
+		C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerHomeView.swift; sourceTree = "<group>"; };
 		D1E8A0102D722C9300B68C9A /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
 		D1E8A0112D722C9300B68C9A /* RealityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = RealityKit.framework; path = System/Library/Frameworks/RealityKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -148,6 +150,7 @@
 				C4FF06532D722C9300B68C9A /* View+Extensions.swift */,
 				C4FF06542D722C9300B68C9A /* ZoomOnTap.swift */,
 				C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */,
+				C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -264,6 +267,7 @@
 				C4FF06792D722C9300B68C9A /* MeshLaplacianSmooth.swift in Sources */,
 				C4FF06762D722C9300B68C9A /* LiDARMeshScanView.swift in Sources */,
 				C4FF06772D722C9300B68C9A /* MainTabView.swift in Sources */,
+				C4FF067B2D722C9300B68C9A /* ScannerHomeView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

@@ -1,7 +1,8 @@
-                                                                               /*
+/*
  Abstract:
- Root tabs: original depth sample + LiDAR mesh scan demo.
- AVFoundation and ARKit cannot use the LiDAR camera at the same time — we pause one when switching tabs.
+ Root navigation: SCANNER PRO home + custom tab bar.
+ LiDAR mesh scan opens full-screen from the home CTA.
+ AVFoundation and ARKit cannot use the LiDAR camera at the same time — pause depth when scanning.
  */
 
 import SwiftUI
@@ -9,29 +10,41 @@ import SwiftUI
 struct MainTabView: View {
 
     @StateObject private var cameraManager = CameraManager()
-    @State private var selectedTab = 0
+    @State private var selectedTab: ScannerTab = .scan
+    @State private var showScanSession = false
 
     var body: some View {
-        TabView(selection: $selectedTab) {
-            ContentView(manager: cameraManager)
-                .tabItem {
-                    Label("Depth", systemImage: "camera.metering.matrix")
-                }
-                .tag(0)
+        ZStack(alignment: .bottom) {
+            ScannerTheme.background.ignoresSafeArea()
 
-            LiDARMeshScanContainer(
-                isTabActive: selectedTab == 1,
-                prepareForAR: { cameraManager.pauseForARSession() }
-            )
-            .tabItem {
-                Label("Quét 3D", systemImage: "cube.transparent")
+            Group {
+                switch selectedTab {
+                case .scan:
+                    ScannerHomeView(onStartScan: { showScanSession = true })
+                case .projects:
+                    ScannerProjectsView()
+                case .cloud:
+                    ScannerCloudView()
+                case .settings:
+                    ScannerSettingsView(cameraManager: cameraManager)
+                }
             }
-            .tag(1)
+            .padding(.bottom, tabBarClearance)
+
+            ScannerTabBar(selectedTab: $selectedTab)
         }
-        .onChange(of: selectedTab) { newValue in
-            if newValue == 0 {
-                cameraManager.resumeAfterARSession()
-            }
+        .preferredColorScheme(.dark)
+        .fullScreenCover(isPresented: $showScanSession) {
+            LiDARMeshScanContainer(
+                isTabActive: showScanSession,
+                prepareForAR: { cameraManager.pauseForARSession() },
+                onDismiss: {
+                    showScanSession = false
+                    cameraManager.resumeAfterARSession()
+                }
+            )
         }
     }
+
+    private var tabBarClearance: CGFloat { 72 }
 }
