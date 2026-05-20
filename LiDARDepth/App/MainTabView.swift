@@ -1,8 +1,7 @@
 /*
  Abstract:
  Root navigation: SCANNER PRO home + custom tab bar.
- LiDAR mesh scan opens full-screen from the home CTA.
- AVFoundation and ARKit cannot use the LiDAR camera at the same time — pause depth when scanning.
+ Scan session overlays AR view with settings bottom sheet on start.
  */
 
 import SwiftUI
@@ -30,21 +29,32 @@ struct MainTabView: View {
                 }
             }
             .padding(.bottom, tabBarClearance)
+            .allowsHitTesting(!showScanSession)
+
+            if showScanSession {
+                LiDARMeshScanContainer(
+                    isTabActive: showScanSession,
+                    prepareForAR: { cameraManager.pauseForARSession() },
+                    onDismiss: { endScanSession() },
+                    onOpenProjects: {
+                        endScanSession()
+                        selectedTab = .projects
+                    }
+                )
+                .padding(.bottom, tabBarClearance)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+            }
 
             ScannerTabBar(selectedTab: $selectedTab)
         }
         .preferredColorScheme(.dark)
-        .fullScreenCover(isPresented: $showScanSession) {
-            LiDARMeshScanContainer(
-                isTabActive: showScanSession,
-                prepareForAR: { cameraManager.pauseForARSession() },
-                onDismiss: {
-                    showScanSession = false
-                    cameraManager.resumeAfterARSession()
-                }
-            )
-        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: showScanSession)
     }
 
     private var tabBarClearance: CGFloat { 72 }
+
+    private func endScanSession() {
+        showScanSession = false
+        cameraManager.resumeAfterARSession()
+    }
 }

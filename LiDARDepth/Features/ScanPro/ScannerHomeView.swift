@@ -5,45 +5,7 @@
 
 import SwiftUI
 
-// MARK: - Theme
-
-enum ScannerTheme {
-    static let background = Color(red: 0.047, green: 0.047, blue: 0.047)       // #0C0C0C
-    static let cardBackground = Color(red: 0.11, green: 0.11, blue: 0.12)
-    static let accent = Color(red: 0.69, green: 0.77, blue: 1.0)             // #B0C4FF
-    static let accentDeep = Color(red: 0.22, green: 0.35, blue: 0.72)
-    static let mutedText = Color.white.opacity(0.55)
-    static let divider = Color.white.opacity(0.08)
-}
-
-// MARK: - Tab enum
-
-enum ScannerTab: Int, CaseIterable, Identifiable {
-    case scan, projects, cloud, settings
-    var id: Int { rawValue }
-
-    var title: String {
-        switch self {
-        case .scan: return "Scan"
-        case .projects: return "Projects"
-        case .cloud: return "Cloud"
-        case .settings: return "Settings"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .scan: return "camera.viewfinder"
-        case .projects: return "folder.fill"
-        case .cloud: return "cloud.fill"
-        case .settings: return "gearshape.fill"
-        }
-    }
-}
-
-// MARK: - Models
-
-struct ScanProject: Identifiable {
+private struct ScanProject: Identifiable {
     let id = UUID()
     let name: String
     let pointCount: String
@@ -62,8 +24,6 @@ private let sampleProjects: [ScanProject] = [
         gradient: [Color(red: 0.55, green: 0.65, blue: 0.75), Color(red: 0.25, green: 0.35, blue: 0.42)]
     ),
 ]
-
-// MARK: - Home
 
 struct ScannerHomeView: View {
     var onStartScan: () -> Void
@@ -177,8 +137,6 @@ struct ScannerHomeView: View {
     }
 }
 
-// MARK: - Subviews
-
 private struct ScannerCubeHeroIcon: View {
     var body: some View {
         ZStack {
@@ -200,19 +158,15 @@ private struct ViewfinderBrackets: View {
             let len: CGFloat = 22
             let stroke = Color.white.opacity(0.35)
             Path { p in
-                // top-left
                 p.move(to: CGPoint(x: 0, y: len))
                 p.addLine(to: .zero)
                 p.addLine(to: CGPoint(x: len, y: 0))
-                // top-right
                 p.move(to: CGPoint(x: w - len, y: 0))
                 p.addLine(to: CGPoint(x: w, y: 0))
                 p.addLine(to: CGPoint(x: w, y: len))
-                // bottom-right
                 p.move(to: CGPoint(x: w, y: h - len))
                 p.addLine(to: CGPoint(x: w, y: h))
                 p.addLine(to: CGPoint(x: w - len, y: h))
-                // bottom-left
                 p.move(to: CGPoint(x: len, y: h))
                 p.addLine(to: CGPoint(x: 0, y: h))
                 p.addLine(to: CGPoint(x: 0, y: h - len))
@@ -297,144 +251,5 @@ private struct QuickActionCard: View {
             )
         }
         .buttonStyle(.plain)
-    }
-}
-
-// MARK: - Tab bar
-
-struct ScannerTabBar: View {
-    @Binding var selectedTab: ScannerTab
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(ScannerTab.allCases) { tab in
-                Button {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                        selectedTab = tab
-                    }
-                } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: tab.icon)
-                            .font(.body.weight(selectedTab == tab ? .semibold : .regular))
-                        Text(tab.title)
-                            .font(.caption2.weight(.medium))
-                    }
-                    .foregroundStyle(selectedTab == tab ? ScannerTheme.accentDeep : ScannerTheme.mutedText)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 10)
-                    .background(
-                        Group {
-                            if selectedTab == tab {
-                                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                                    .fill(ScannerTheme.accent.opacity(0.55))
-                            }
-                        }
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(
-            ScannerTheme.cardBackground
-                .overlay(ScannerTheme.divider.frame(height: 1), alignment: .top)
-        )
-    }
-}
-
-// MARK: - Placeholder tabs
-
-struct ScannerProjectsView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "folder.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(ScannerTheme.accent.opacity(0.6))
-            Text("Dự án")
-                .font(.title2.weight(.bold))
-            Text("Các bản quét đã lưu sẽ hiển thị tại đây.")
-                .font(.subheadline)
-                .foregroundStyle(ScannerTheme.mutedText)
-                .multilineTextAlignment(.center)
-            Spacer()
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(ScannerTheme.background)
-        .foregroundStyle(.white)
-    }
-}
-
-struct ScannerCloudView: View {
-    var body: some View {
-        VStack(spacing: 16) {
-            Spacer()
-            Image(systemName: "cloud.fill")
-                .font(.system(size: 48))
-                .foregroundStyle(ScannerTheme.accent.opacity(0.6))
-            Text("Cloud")
-                .font(.title2.weight(.bold))
-            Text("Đồng bộ và chia sẻ mô hình 3D lên cloud.")
-                .font(.subheadline)
-                .foregroundStyle(ScannerTheme.mutedText)
-                .multilineTextAlignment(.center)
-            Spacer()
-        }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(ScannerTheme.background)
-        .foregroundStyle(.white)
-    }
-}
-
-struct ScannerSettingsView: View {
-    @ObservedObject var cameraManager: CameraManager
-    @State private var showDepthLab = false
-
-    var body: some View {
-        NavigationView {
-            List {
-                Section(header: Text("Công cụ")) {
-                    Button {
-                        showDepthLab = true
-                    } label: {
-                        Label("Depth Lab", systemImage: "camera.metering.matrix")
-                    }
-                }
-                Section(header: Text("Thông tin")) {
-                    settingsRow(title: "Phiên bản", value: "1.0")
-                    settingsRow(title: "Thiết bị", value: UIDevice.current.model)
-                }
-            }
-            .listStyle(.insetGrouped)
-            .background(ScannerTheme.background)
-            .navigationTitle("Settings")
-            .navigationBarTitleDisplayMode(.large)
-            .sheet(isPresented: $showDepthLab) {
-                NavigationView {
-                    ContentView(manager: cameraManager)
-                        .navigationTitle("Depth Lab")
-                        .navigationBarTitleDisplayMode(.inline)
-                        .toolbar {
-                            ToolbarItem(placement: .confirmationAction) {
-                                Button("Xong") { showDepthLab = false }
-                            }
-                        }
-                }
-            }
-        }
-        .navigationViewStyle(.stack)
-        .background(ScannerTheme.background)
-    }
-
-    private func settingsRow(title: String, value: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text(value)
-                .foregroundColor(.secondary)
-        }
     }
 }

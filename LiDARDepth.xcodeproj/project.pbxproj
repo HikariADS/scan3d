@@ -30,6 +30,11 @@
 		C4FF06762D722C9300B68C9A /* LiDARMeshScanView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */; };
 		C4FF06772D722C9300B68C9A /* MainTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06742D722C9300B68C9A /* MainTabView.swift */; };
 		C4FF067B2D722C9300B68C9A /* ScannerHomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */; };
+		C4FF067D2D722C9300B68C9A /* ScanSettingsBottomSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF067C2D722C9300B68C9A /* ScanSettingsBottomSheet.swift */; };
+		C4FF067F2D722C9300B68C9A /* ScanProSplashView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF067E2D722C9300B68C9A /* ScanProSplashView.swift */; };
+		C4FF06812D722C9300B68C9A /* ScannerTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06802D722C9300B68C9A /* ScannerTheme.swift */; };
+		C4FF06832D722C9300B68C9A /* AppRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06822D722C9300B68C9A /* AppRootView.swift */; };
+		C4FF06852D722C9300B68C9A /* ScannerTabViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06842D722C9300B68C9A /* ScannerTabViews.swift */; };
 		D1E8A0122D722C9300B68C9A /* ARKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0102D722C9300B68C9A /* ARKit.framework */; };
 		D1E8A0132D722C9300B68C9A /* RealityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0112D722C9300B68C9A /* RealityKit.framework */; };
 /* End PBXBuildFile section */
@@ -62,6 +67,11 @@
 		C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiDARMeshScanView.swift; sourceTree = "<group>"; };
 		C4FF06742D722C9300B68C9A /* MainTabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainTabView.swift; sourceTree = "<group>"; };
 		C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerHomeView.swift; sourceTree = "<group>"; };
+		C4FF067C2D722C9300B68C9A /* ScanSettingsBottomSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanSettingsBottomSheet.swift; sourceTree = "<group>"; };
+		C4FF067E2D722C9300B68C9A /* ScanProSplashView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanProSplashView.swift; sourceTree = "<group>"; };
+		C4FF06802D722C9300B68C9A /* ScannerTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerTheme.swift; sourceTree = "<group>"; };
+		C4FF06822D722C9300B68C9A /* AppRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRootView.swift; sourceTree = "<group>"; };
+		C4FF06842D722C9300B68C9A /* ScannerTabViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerTabViews.swift; sourceTree = "<group>"; };
 		D1E8A0102D722C9300B68C9A /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
 		D1E8A0112D722C9300B68C9A /* RealityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = RealityKit.framework; path = System/Library/Frameworks/RealityKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -142,28 +152,65 @@
 			path = Metal;
 			sourceTree = "<group>";
 		};
-		C4FF06552D722C9300B68C9A /* Views */ = {
+		C4FF06862D722C9300B68C9A /* App */ = {
 			isa = PBXGroup;
 			children = (
-				C4FF06512D722C9300B68C9A /* Metal */,
-				C4FF06522D722C9300B68C9A /* DepthOverlay.swift */,
-				C4FF06532D722C9300B68C9A /* View+Extensions.swift */,
-				C4FF06542D722C9300B68C9A /* ZoomOnTap.swift */,
-				C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */,
-				C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */,
+				C4FF06582D722C9300B68C9A /* LiDARDepthApp.swift */,
+				C4FF06822D722C9300B68C9A /* AppRootView.swift */,
+				C4FF06742D722C9300B68C9A /* MainTabView.swift */,
 			);
-			path = Views;
+			path = App;
+			sourceTree = "<group>";
+		};
+		C4FF06872D722C9300B68C9A /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				C4FF06802D722C9300B68C9A /* ScannerTheme.swift */,
+				C4FF06532D722C9300B68C9A /* View+Extensions.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		C4FF06892D722C9300B68C9A /* ScanPro */ = {
+			isa = PBXGroup;
+			children = (
+				C4FF067A2D722C9300B68C9A /* ScannerHomeView.swift */,
+				C4FF06842D722C9300B68C9A /* ScannerTabViews.swift */,
+				C4FF067E2D722C9300B68C9A /* ScanProSplashView.swift */,
+				C4FF067C2D722C9300B68C9A /* ScanSettingsBottomSheet.swift */,
+				C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */,
+			);
+			path = ScanPro;
+			sourceTree = "<group>";
+		};
+		C4FF068A2D722C9300B68C9A /* DepthLab */ = {
+			isa = PBXGroup;
+			children = (
+				C4FF06572D722C9300B68C9A /* ContentView.swift */,
+				C4FF06522D722C9300B68C9A /* DepthOverlay.swift */,
+				C4FF06542D722C9300B68C9A /* ZoomOnTap.swift */,
+				C4FF06512D722C9300B68C9A /* Metal */,
+			);
+			path = DepthLab;
+			sourceTree = "<group>";
+		};
+		C4FF06882D722C9300B68C9A /* Features */ = {
+			isa = PBXGroup;
+			children = (
+				C4FF06892D722C9300B68C9A /* ScanPro */,
+				C4FF068A2D722C9300B68C9A /* DepthLab */,
+			);
+			path = Features;
 			sourceTree = "<group>";
 		};
 		C4FF06592D722C9300B68C9A /* LiDARDepth */ = {
 			isa = PBXGroup;
 			children = (
-				C4FF06572D722C9300B68C9A /* ContentView.swift */,
-				C4FF06742D722C9300B68C9A /* MainTabView.swift */,
+				C4FF06862D722C9300B68C9A /* App */,
+				C4FF06872D722C9300B68C9A /* Shared */,
+				C4FF06882D722C9300B68C9A /* Features */,
 				C4FF06462D722C9300B68C9A /* Model */,
-				C4FF06552D722C9300B68C9A /* Views */,
 				C4FF06562D722C9300B68C9A /* Assets.xcassets */,
-				C4FF06582D722C9300B68C9A /* LiDARDepthApp.swift */,
 			);
 			path = LiDARDepth;
 			sourceTree = "<group>";
@@ -268,6 +315,11 @@
 				C4FF06762D722C9300B68C9A /* LiDARMeshScanView.swift in Sources */,
 				C4FF06772D722C9300B68C9A /* MainTabView.swift in Sources */,
 				C4FF067B2D722C9300B68C9A /* ScannerHomeView.swift in Sources */,
+				C4FF067D2D722C9300B68C9A /* ScanSettingsBottomSheet.swift in Sources */,
+				C4FF067F2D722C9300B68C9A /* ScanProSplashView.swift in Sources */,
+				C4FF06812D722C9300B68C9A /* ScannerTheme.swift in Sources */,
+				C4FF06832D722C9300B68C9A /* AppRootView.swift in Sources */,
+				C4FF06852D722C9300B68C9A /* ScannerTabViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -407,6 +459,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "ScanPro 3D";
 				INFOPLIST_KEY_NSCameraUsageDescription = "The app uses the LiDAR camera to capture depth data.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -444,6 +497,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "ScanPro 3D";
 				INFOPLIST_KEY_NSCameraUsageDescription = "The app uses the LiDAR camera to capture depth data.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

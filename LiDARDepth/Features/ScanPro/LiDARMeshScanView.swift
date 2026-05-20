@@ -729,6 +729,7 @@ struct LiDARMeshScanContainer: View {
     var isTabActive: Bool
     var prepareForAR: () -> Void
     var onDismiss: (() -> Void)? = nil
+    var onOpenProjects: (() -> Void)? = nil
 
     // Scan mode
     @State private var scanCategory: ScanCategory = .area
@@ -736,7 +737,7 @@ struct LiDARMeshScanContainer: View {
     @State private var exportSubject: ARMeshExporter.ExportSubject = .room
 
     // Settings
-    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .high
+    @State private var smoothingPreset: MeshLaplacianSmooth.QualityPreset = .precise
     @State private var detailPatches: [ARMeshExporter.DetailPatch] = []
 
     // Reference points
@@ -796,85 +797,144 @@ struct LiDARMeshScanContainer: View {
             }
 
             VStack(spacing: 0) {
-                topBar.padding(.top, 8)
-                if !captureHintText.isEmpty {
+                scanProTopBar.padding(.top, 8)
+                if !showSettings {
+                    compactModeSelector
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                }
+                if !captureHintText.isEmpty, !showSettings {
                     captureQualityBanner
                         .padding(.horizontal, 12)
                         .padding(.top, 10)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 Spacer()
-                if isMarkingMode { markingOverlay.padding(.bottom, 20) }
-                bottomPanel
+                if isMarkingMode, !showSettings { markingOverlay.padding(.bottom, 20) }
+                if !showSettings { bottomPanel }
+            }
+
+            if showSettings {
+                Color.black.opacity(0.35)
+                    .ignoresSafeArea()
+                    .transition(.opacity)
+                    .onTapGesture { withAnimation { showSettings = false } }
+
+                VStack {
+                    Spacer()
+                    ScanSettingsBottomSheet(
+                        smoothingPreset: $smoothingPreset,
+                        detailPatches: $detailPatches,
+                        onAddPatch: addDetailPatch,
+                        onDeletePatch: deleteDetailPatch,
+                        onClose: { withAnimation { showSettings = false } },
+                        onExport: {
+                            withAnimation { showSettings = false }
+                            exportAll()
+                        }
+                    )
+                    .frame(maxHeight: UIScreen.main.bounds.height * 0.72)
+                }
+                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
+        .animation(.spring(response: 0.35, dampingFraction: 0.86), value: showSettings)
         .sheet(isPresented: $showShare) {
             if !exportURLs.isEmpty { ShareSheet(items: exportURLs) }
         }
-        .sheet(isPresented: $showSettings) { settingsSheet }
         .onAppear { syncExportSubject() }
     }
 
-    // MARK: Top bar
+    // MARK: ScanPro top bar
 
-    private var topBar: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 10) {
-                if let onDismiss {
-                    Button(action: onDismiss) {
-                        Image(systemName: "chevron.left")
-                            .font(.body.weight(.semibold))
-                            .frame(width: 38, height: 38)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
-                    }
-                }
+    private var scanProTopBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                onDismiss?()
+            } label: {
+                Image(systemName: "square.grid.2x2")
+                    .font(.body.weight(.medium))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 38, height: 38)
+                    .background(Color.white.opacity(0.12))
+                    .clipShape(Circle())
+            }
 
-                // Mode capsule selector
-                HStack(spacing: 2) {
-                    ForEach(ScanCategory.allCases) { cat in
-                        Button {
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
-                                scanCategory = cat
-                                isMarkingMode = false
-                                syncExportSubject()
-                            }
-                        } label: {
-                            HStack(spacing: 5) {
-                                Image(systemName: cat.icon).font(.caption.weight(.semibold))
-                                Text(cat.title).font(.subheadline.weight(.semibold))
-                            }
-                            .padding(.horizontal, 14).padding(.vertical, 8)
-                            .background(scanCategory == cat ? Color.accentColor : Color.clear)
-                            .foregroundStyle(scanCategory == cat ? .white : .primary)
-                            .clipShape(Capsule())
-                        }
-                    }
-                }
-                .padding(3)
-                .background(.ultraThinMaterial)
-                .clipShape(Capsule())
+            Text("ScanPro")
+                .font(.subheadline.weight(.bold))
+                .foregroundColor(ScannerTheme.accent)
 
-                Spacer()
+            Spacer()
 
-                Button { showSettings = true } label: {
-                    Image(systemName: "slider.horizontal.3")
-                        .font(.body.weight(.medium))
-                        .frame(width: 38, height: 38)
-                        .background(.ultraThinMaterial)
-                        .clipShape(Circle())
+            HStack(spacing: 0) {
+                Text("Scan")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.black)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 7)
+                    .background(Color.white)
+                    .clipShape(Capsule())
+
+                Button {
+                    onOpenProjects?()
+                } label: {
+                    Text("Projects")
+                        .font(.caption.weight(.medium))
+                        .foregroundColor(.white.opacity(0.55))
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 7)
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(3)
+            .background(Color.white.opacity(0.12))
+            .clipShape(Capsule())
+
+            Button { withAnimation { showSettings = true } } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.body.weight(.medium))
+                    .foregroundColor(.white.opacity(0.85))
+                    .frame(width: 38, height: 38)
+                    .background(Color.white.opacity(0.12))
+                    .clipShape(Circle())
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
+    // MARK: Mode selector (visible when settings sheet is closed)
+
+    private var compactModeSelector: some View {
+        VStack(spacing: 8) {
+            HStack(spacing: 2) {
+                ForEach(ScanCategory.allCases) { cat in
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                            scanCategory = cat
+                            isMarkingMode = false
+                            syncExportSubject()
+                        }
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: cat.icon).font(.caption2.weight(.semibold))
+                            Text(cat.title).font(.caption.weight(.semibold))
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .background(scanCategory == cat ? Color.accentColor : Color.clear)
+                        .foregroundColor(scanCategory == cat ? .white : .white.opacity(0.6))
+                        .clipShape(Capsule())
+                    }
+                }
+            }
+            .padding(3)
+            .background(Color.white.opacity(0.12))
+            .clipShape(Capsule())
 
             if scanCategory == .object {
                 Picker("Chi tiết", selection: $objectDetailMode) {
                     ForEach(ObjectDetailMode.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .padding(.horizontal, 16)
                 .onChange(of: objectDetailMode) { _ in syncExportSubject() }
-                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
@@ -1042,50 +1102,6 @@ struct LiDARMeshScanContainer: View {
         .padding(.bottom, 8)
     }
 
-    // MARK: Settings sheet
-
-    @ViewBuilder
-    private var settingsSheet: some View {
-        NavigationView {
-            Form {
-                Section("Làm mịn mesh") {
-                    Picker("Chất lượng", selection: $smoothingPreset) {
-                        ForEach(MeshLaplacianSmooth.QualityPreset.allCases) { Text($0.displayName).tag($0) }
-                    }
-                    .pickerStyle(.segmented)
-                    Text("High: mịn nhất. Medium: cân bằng. Low: nhanh.")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-
-                Section("Vùng chi tiết (Detail Patches)") {
-                    if detailPatches.isEmpty {
-                        Text("Chưa có vùng nào. Bấm nút bên dưới khi chĩa tâm màn hình vào vùng cần tăng chi tiết.")
-                            .font(.caption).foregroundStyle(.secondary)
-                    } else {
-                        ForEach(Array(detailPatches.enumerated()), id: \.element.id) { idx, p in
-                            HStack {
-                                Text("\(idx + 1). \(p.label)")
-                                Spacer()
-                                Text("r=\(String(format: "%.2f", p.radius))m")
-                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                            }
-                        }
-                        .onDelete { detailPatches.remove(atOffsets: $0) }
-                        Button("Xóa tất cả vùng chi tiết", role: .destructive) { detailPatches.removeAll() }
-                    }
-                    Button { addDetailPatch() } label: {
-                        Label("Đánh dấu vùng tâm màn hình", systemImage: "plus.viewfinder")
-                    }
-                }
-            }
-            .navigationTitle("Cài đặt quét")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) { Button("Xong") { showSettings = false } }
-            }
-        }
-    }
-
     // MARK: View helpers
 
     @ViewBuilder
@@ -1193,6 +1209,7 @@ struct LiDARMeshScanContainer: View {
     }
 
     private func addDetailPatch() {
+        guard detailPatches.count < ScanSettingsBottomSheet.maxPatches else { return }
         guard let view = arViewRef else { return }
         let center  = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
         let results = view.raycast(from: center, allowing: .estimatedPlane, alignment: .any)
@@ -1205,8 +1222,15 @@ struct LiDARMeshScanContainer: View {
             let f = -SIMD3<Float>(t.columns.2.x, t.columns.2.y, t.columns.2.z)
             pos = p + simd_normalize(f) * 0.55
         } else { return }
-        detailPatches.append(ARMeshExporter.DetailPatch(center: pos, radius: 0.9,
-                                                        label: "Patch \(detailPatches.count + 1)"))
+
+        let index = detailPatches.count
+        let label = index == 0 ? "Vùng trung tâm" : "Vùng chi tiết \(index + 1)"
+        let radius: Float = index == 0 ? 0.9 : 0.45
+        detailPatches.append(ARMeshExporter.DetailPatch(center: pos, radius: radius, label: label))
+    }
+
+    private func deleteDetailPatch(_ id: UUID) {
+        detailPatches.removeAll { $0.id == id }
     }
 
     private func clearAll() {
