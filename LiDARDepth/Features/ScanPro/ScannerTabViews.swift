@@ -47,22 +47,34 @@ struct ScannerTabBar: View {
 }
 
 struct ScannerProjectsView: View {
+    @ObservedObject private var library = ScanLibrary.shared
+
     var body: some View {
-        placeholderScreen(
-            icon: "folder.fill",
-            title: "Dự án",
-            subtitle: "Các bản quét đã lưu sẽ hiển thị tại đây."
-        )
+        NavigationView {
+            LocalScanLibraryView(library: library, showsCloudBanner: false)
+                .navigationTitle("Dự án")
+                .navigationBarTitleDisplayMode(.large)
+        }
+        .navigationViewStyle(.stack)
+        .background(ScannerTheme.background)
+        .foregroundStyle(.white)
+        .onAppear { library.reload() }
     }
 }
 
 struct ScannerCloudView: View {
+    @ObservedObject private var library = ScanLibrary.shared
+
     var body: some View {
-        placeholderScreen(
-            icon: "cloud.fill",
-            title: "Cloud",
-            subtitle: "Đồng bộ và chia sẻ mô hình 3D lên cloud."
-        )
+        NavigationView {
+            LocalScanLibraryView(library: library, showsCloudBanner: true)
+                .navigationTitle("Cloud")
+                .navigationBarTitleDisplayMode(.large)
+        }
+        .navigationViewStyle(.stack)
+        .background(ScannerTheme.background)
+        .foregroundStyle(.white)
+        .onAppear { library.reload() }
     }
 }
 

@@ -35,6 +35,10 @@
 		C4FF06812D722C9300B68C9A /* ScannerTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06802D722C9300B68C9A /* ScannerTheme.swift */; };
 		C4FF06832D722C9300B68C9A /* AppRootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06822D722C9300B68C9A /* AppRootView.swift */; };
 		C4FF06852D722C9300B68C9A /* ScannerTabViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06842D722C9300B68C9A /* ScannerTabViews.swift */; };
+		C4FF068C2D722C9300B68C9A /* ScanExportFormat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF068B2D722C9300B68C9A /* ScanExportFormat.swift */; };
+		C4FF068E2D722C9300B68C9A /* ScanExportFormatPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF068D2D722C9300B68C9A /* ScanExportFormatPicker.swift */; };
+		C4FF06902D722C9300B68C9A /* ScanLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF068F2D722C9300B68C9A /* ScanLibrary.swift */; };
+		C4FF06922D722C9300B68C9A /* LocalScanLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C4FF06912D722C9300B68C9A /* LocalScanLibraryView.swift */; };
 		D1E8A0122D722C9300B68C9A /* ARKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0102D722C9300B68C9A /* ARKit.framework */; };
 		D1E8A0132D722C9300B68C9A /* RealityKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = D1E8A0112D722C9300B68C9A /* RealityKit.framework */; };
 /* End PBXBuildFile section */
@@ -72,6 +76,10 @@
 		C4FF06802D722C9300B68C9A /* ScannerTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerTheme.swift; sourceTree = "<group>"; };
 		C4FF06822D722C9300B68C9A /* AppRootView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppRootView.swift; sourceTree = "<group>"; };
 		C4FF06842D722C9300B68C9A /* ScannerTabViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScannerTabViews.swift; sourceTree = "<group>"; };
+		C4FF068B2D722C9300B68C9A /* ScanExportFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanExportFormat.swift; sourceTree = "<group>"; };
+		C4FF068D2D722C9300B68C9A /* ScanExportFormatPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanExportFormatPicker.swift; sourceTree = "<group>"; };
+		C4FF068F2D722C9300B68C9A /* ScanLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScanLibrary.swift; sourceTree = "<group>"; };
+		C4FF06912D722C9300B68C9A /* LocalScanLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalScanLibraryView.swift; sourceTree = "<group>"; };
 		D1E8A0102D722C9300B68C9A /* ARKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ARKit.framework; path = System/Library/Frameworks/ARKit.framework; sourceTree = SDKROOT; };
 		D1E8A0112D722C9300B68C9A /* RealityKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = RealityKit.framework; path = System/Library/Frameworks/RealityKit.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
@@ -124,6 +132,7 @@
 				C4FF06452D722C9300B68C9A /* CVPixelBuffer+Extension.swift */,
 				C4FF06722D722C9300B68C9A /* ARMeshExporter.swift */,
 				C4FF06782D722C9300B68C9A /* MeshLaplacianSmooth.swift */,
+				C4FF068F2D722C9300B68C9A /* ScanLibrary.swift */,
 			);
 			path = Model;
 			sourceTree = "<group>";
@@ -166,6 +175,7 @@
 			isa = PBXGroup;
 			children = (
 				C4FF06802D722C9300B68C9A /* ScannerTheme.swift */,
+				C4FF068B2D722C9300B68C9A /* ScanExportFormat.swift */,
 				C4FF06532D722C9300B68C9A /* View+Extensions.swift */,
 			);
 			path = Shared;
@@ -179,6 +189,8 @@
 				C4FF067E2D722C9300B68C9A /* ScanProSplashView.swift */,
 				C4FF067C2D722C9300B68C9A /* ScanSettingsBottomSheet.swift */,
 				C4FF06732D722C9300B68C9A /* LiDARMeshScanView.swift */,
+				C4FF068D2D722C9300B68C9A /* ScanExportFormatPicker.swift */,
+				C4FF06912D722C9300B68C9A /* LocalScanLibraryView.swift */,
 			);
 			path = ScanPro;
 			sourceTree = "<group>";
@@ -320,6 +332,10 @@
 				C4FF06812D722C9300B68C9A /* ScannerTheme.swift in Sources */,
 				C4FF06832D722C9300B68C9A /* AppRootView.swift in Sources */,
 				C4FF06852D722C9300B68C9A /* ScannerTabViews.swift in Sources */,
+				C4FF068C2D722C9300B68C9A /* ScanExportFormat.swift in Sources */,
+				C4FF068E2D722C9300B68C9A /* ScanExportFormatPicker.swift in Sources */,
+				C4FF06902D722C9300B68C9A /* ScanLibrary.swift in Sources */,
+				C4FF06922D722C9300B68C9A /* LocalScanLibraryView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

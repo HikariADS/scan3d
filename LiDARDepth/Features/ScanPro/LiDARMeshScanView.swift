@@ -756,6 +756,7 @@ struct LiDARMeshScanContainer: View {
     @State private var captureHintCritical = false
 
     // Export / share
+    @State private var exportFormat: ScanExportFormat = .glb
     @State private var isExporting    = false
     @State private var exportMessage: String?
     @State private var exportURLs: [URL] = []
@@ -764,6 +765,11 @@ struct LiDARMeshScanContainer: View {
     @State private var arViewRef: ARView?
 
     private var hasData: Bool { triangleCount > 0 || meshAnchorCount > 0 }
+
+    private var canExport: Bool {
+        exportFormat.isEnabled(hasReferencePoints: !referencePoints.isEmpty)
+            && (exportFormat == .markersJSON || hasData)
+    }
 
     // MARK: Body
 
@@ -825,12 +831,14 @@ struct LiDARMeshScanContainer: View {
                     ScanSettingsBottomSheet(
                         smoothingPreset: $smoothingPreset,
                         detailPatches: $detailPatches,
+                        exportFormat: $exportFormat,
+                        hasReferencePoints: !referencePoints.isEmpty,
                         onAddPatch: addDetailPatch,
                         onDeletePatch: deleteDetailPatch,
                         onClose: { withAnimation { showSettings = false } },
                         onExport: {
                             withAnimation { showSettings = false }
-                            exportAll()
+                            exportScan()
                         }
                     )
                     .frame(maxHeight: UIScreen.main.bounds.height * 0.72)
@@ -1066,23 +1074,32 @@ struct LiDARMeshScanContainer: View {
                     }
                 }
 
-                // Export button
-                Button(action: exportAll) {
+                // Export format + button
+                HStack(spacing: 10) {
+                    ScanExportFormatPicker(
+                        selection: $exportFormat,
+                        hasReferencePoints: !referencePoints.isEmpty,
+                        style: .compact
+                    )
+                    Spacer()
+                }
+
+                Button(action: exportScan) {
                     Group {
                         if isExporting {
                             HStack(spacing: 8) { ProgressView().tint(.white); Text("Đang xuất...").font(.body.weight(.bold)) }
                         } else {
-                            let jsonNote = referencePoints.isEmpty ? "" : " + \(referencePoints.count) điểm JSON"
-                            Label("Export GLB + OBJ\(jsonNote)", systemImage: "square.and.arrow.up.fill").font(.body.weight(.bold))
+                            Label("Xuất \(exportFormat.title)", systemImage: "square.and.arrow.up.fill")
+                                .font(.body.weight(.bold))
                         }
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 13)
-                    .background(hasData && !isExporting ? Color.accentColor : Color.secondary.opacity(0.25))
+                    .background(canExport && !isExporting ? Color.accentColor : Color.secondary.opacity(0.25))
                     .foregroundStyle(.white)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                .disabled(!hasData || isExporting)
+                .disabled(!canExport || isExporting)
 
                 if let msg = exportMessage {
                     Text(msg)
@@ -1245,72 +1262,132 @@ struct LiDARMeshScanContainer: View {
         exportMessage = "Đã xóa \(cleared) vùng đã lưu."
     }
 
-    private func exportAll() {
+    private func exportScan() {
         exportMessage = nil
-        ScanLog.export("exportAll bắt đầu — arViewRef=\(arViewRef != nil ? "✓" : "NIL ✗")  triangles=\(triangleCount)  frozen=\(frozenBlockCount)")
+        ScanLog.export("exportScan — format=\(exportFormat.rawValue)")
 
-        guard let view = arViewRef else {
-            ScanLog.error("exportAll FAIL: arViewRef nil — có thể do sheet/disappear đã nil ref. Thử bấm lại tab Quét 3D.")
-            exportMessage = "Camera AR chưa sẵn sàng — bấm lại tab Quét 3D rồi thử lại."
+        if exportFormat == .markersJSON {
+            guard !referencePoints.isEmpty else {
+                exportMessage = "Chưa có điểm chuẩn để xuất JSON."
+                return
+            }
+            performExport(session: arViewRef?.session, stamp: Int(Date().timeIntervalSince1970))
             return
         }
 
-        isExporting = true
-        exportMessage = "Đang xuất..."
-        let session   = view.session
-        let stamp     = Int(Date().timeIntervalSince1970)
-        let preset    = smoothingPreset
-        let profile   = ARMeshExporter.ExportProfile(subject: exportSubject)
-        let patches   = detailPatches
-        let hasRefPts = !referencePoints.isEmpty
+        guard let view = arViewRef else {
+            exportMessage = "Camera AR chưa sẵn sàng — thử lại."
+            return
+        }
+        guard hasData else {
+            exportMessage = "Chưa có mesh – tiếp tục quét."
+            return
+        }
 
-        ScanLog.export("profile=\(exportSubject.rawValue)  patches=\(patches.count)  refPts=\(referencePoints.count)  smoothing=\(preset.rawValue)")
+        performExport(session: view.session, stamp: Int(Date().timeIntervalSince1970))
+    }
+
+    private func performExport(session: ARSession?, stamp: Int) {
+        isExporting = true
+        exportMessage = "Đang xuất \(exportFormat.title)..."
+        let preset  = smoothingPreset
+        let profile = ARMeshExporter.ExportProfile(subject: exportSubject)
+        let patches = detailPatches
+        let format  = exportFormat
+        let triCount = triangleCount
+
+        ScanLog.export("format=\(format.rawValue)  profile=\(exportSubject.rawValue)  patches=\(patches.count)")
 
         let t0 = Date()
         DispatchQueue.global(qos: .userInitiated).async {
             MeshLaplacianSmooth.applyPreset(preset)
             let dir = FileManager.default.temporaryDirectory
-            var urls: [URL] = []; var errors: [String] = []
+            var urls: [URL] = []
+            var errors: [String] = []
+            var usedTexturedGLB = false
+
             do {
-                // GLB
-                ScanLog.export("Đang build GLB...")
-                let t1 = Date()
-                if let data = ARMeshExporter.buildFacetedGLB(from: session, profile: profile, detailPatches: patches) {
-                    let url = dir.appendingPathComponent("scan-\(stamp).glb")
-                    try data.write(to: url, options: .atomic)
-                    urls.append(url)
-                    ScanLog.export("GLB ✓  size=\(data.count / 1024)KB  elapsed=\(String(format:"%.1f",Date().timeIntervalSince(t1)))s")
-                } else {
-                    errors.append("GLB thất bại")
-                    ScanLog.error("GLB build trả về nil")
+                switch format {
+                case .glb:
+                    ScanLog.export("Đang build GLB premium (texture → vertex)...")
+                    if let session, let result = ARMeshExporter.buildPremiumGLB(from: session, profile: profile, detailPatches: patches) {
+                        usedTexturedGLB = result.usedTexture
+                        let suffix = result.usedTexture ? "" : "-vertex"
+                        let url = dir.appendingPathComponent("scan-\(stamp)\(suffix).glb")
+                        try result.data.write(to: url, options: .atomic)
+                        urls.append(url)
+                        ScanLog.export("GLB ✓ textured=\(result.usedTexture) size=\(result.data.count / 1024)KB")
+                    } else { errors.append("GLB thất bại") }
+
+                case .objColored:
+                    ScanLog.export("Đang build OBJ...")
+                    if let session, let text = ARMeshExporter.buildColoredOBJString(from: session) {
+                        let url = dir.appendingPathComponent("scan-\(stamp).obj")
+                        try text.write(to: url, atomically: true, encoding: .utf8)
+                        urls.append(url)
+                    } else { errors.append("OBJ thất bại") }
+
+                case .ply:
+                    ScanLog.export("Đang build PLY...")
+                    if let session, let text = ARMeshExporter.buildColoredPLYString(from: session) {
+                        let url = dir.appendingPathComponent("scan-\(stamp).ply")
+                        try text.write(to: url, atomically: true, encoding: .utf8)
+                        urls.append(url)
+                    } else { errors.append("PLY thất bại") }
+
+                case .objTextured:
+                    ScanLog.export("Đang build Textured OBJ...")
+                    let texName = "scan-\(stamp)-texture.jpg"
+                    if let session, let bundle = ARMeshExporter.buildTexturedOBJBundle(from: session, textureFilename: texName, profile: profile, detailPatches: patches) {
+                        let objURL = dir.appendingPathComponent("scan-\(stamp).obj")
+                        let mtlURL = dir.appendingPathComponent("scan-\(stamp).mtl")
+                        let texURL = dir.appendingPathComponent(texName)
+                        try bundle.obj.write(to: objURL, atomically: true, encoding: .utf8)
+                        try bundle.mtl.write(to: mtlURL, atomically: true, encoding: .utf8)
+                        try bundle.textureJPEG.write(to: texURL, options: .atomic)
+                        urls.append(contentsOf: [objURL, mtlURL, texURL])
+                    } else { errors.append("OBJ + Texture thất bại") }
+
+                case .markersJSON:
+                    ScanLog.export("Đang build markers JSON...")
+                    if let json = ARMeshExporter.buildReferencePointsJSON() {
+                        let jsonURL = dir.appendingPathComponent("scan-\(stamp)-markers.json")
+                        try json.write(to: jsonURL, options: .atomic)
+                        urls.append(jsonURL)
+                    } else { errors.append("JSON thất bại") }
                 }
 
-                // Reference points JSON
-                if hasRefPts, let json = ARMeshExporter.buildReferencePointsJSON() {
-                    let jsonURL = dir.appendingPathComponent("scan-\(stamp)-markers.json")
-                    try json.write(to: jsonURL, options: .atomic)
-                    urls.append(jsonURL)
-                    ScanLog.export("markers.json ✓  \(ARMeshExporter.referencePointCount) điểm")
-                }
-
-                ScanLog.export("Export hoàn tất — \(urls.count) files  tổng=\(String(format:"%.1f",Date().timeIntervalSince(t0)))s  errors=\(errors)")
+                ScanLog.export("Export hoàn tất — \(urls.count) files  tổng=\(String(format:"%.1f",Date().timeIntervalSince(t0)))s")
             } catch {
-                ScanLog.error("exportAll ghi file thất bại: \(error)")
+                ScanLog.error("exportScan ghi file thất bại: \(error)")
                 DispatchQueue.main.async {
                     self.isExporting = false
                     self.exportMessage = "Lỗi ghi file: \(error.localizedDescription)"
                 }
                 return
             }
+
             DispatchQueue.main.async {
                 self.isExporting = false
                 if urls.isEmpty {
-                    self.exportMessage = "Chưa có mesh – tiếp tục quét."
+                    self.exportMessage = errors.isEmpty ? "Xuất thất bại." : errors.joined(separator: ", ")
                 } else {
-                    self.exportURLs    = urls
-                    let errNote        = errors.isEmpty ? "" : " (\(errors.joined(separator: ", ")))"
-                    self.exportMessage = "Xuất \(urls.count) file\(errNote)"
-                    self.showShare     = true
+                    let triangles = triCount > 0
+                        ? triCount
+                        : (session.map { ARMeshExporter.meshStatistics(from: $0).triangles } ?? 0)
+                    if ScanLibrary.shared.saveExport(
+                        fromTemporaryFiles: urls,
+                        format: format,
+                        triangleCount: triangles,
+                        usedTexturedGLB: usedTexturedGLB
+                    ) != nil {
+                        ScanLog.export("Đã lưu vào thư viện máy (\(triangles) △)")
+                    }
+                    self.exportURLs = urls
+                    let savedNote = format == .glb && usedTexturedGLB ? " · texture" : ""
+                    let errNote = errors.isEmpty ? "" : " (\(errors.joined(separator: ", ")))"
+                    self.exportMessage = "Xuất \(format.title)\(savedNote): \(urls.count) file · đã lưu máy\(errNote)"
+                    self.showShare = true
                 }
             }
         }

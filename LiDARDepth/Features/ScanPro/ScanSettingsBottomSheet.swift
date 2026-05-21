@@ -8,7 +8,9 @@ import SwiftUI
 struct ScanSettingsBottomSheet: View {
     @Binding var smoothingPreset: MeshLaplacianSmooth.QualityPreset
     @Binding var detailPatches: [ARMeshExporter.DetailPatch]
+    @Binding var exportFormat: ScanExportFormat
 
+    var hasReferencePoints: Bool
     var onAddPatch: () -> Void
     var onDeletePatch: (UUID) -> Void
     var onClose: () -> Void
@@ -29,6 +31,12 @@ struct ScanSettingsBottomSheet: View {
                     meshSmoothingSection
                     detailPatchesSection
                     addPatchButton
+                    ScanExportFormatPicker(
+                        selection: $exportFormat,
+                        hasReferencePoints: hasReferencePoints,
+                        style: .card
+                    )
+                    exportActionButton
                     bottomInfoGrid
                 }
                 .padding(.horizontal, 20)
@@ -184,6 +192,24 @@ struct ScanSettingsBottomSheet: View {
         .disabled(detailPatches.count >= Self.maxPatches)
     }
 
+    private var exportActionButton: some View {
+        Button(action: onExport) {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.arrow.up.fill")
+                    .font(.body.weight(.semibold))
+                Text("Xuất \(exportFormat.title)")
+                    .font(.subheadline.weight(.bold))
+            }
+            .foregroundColor(.white)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 14)
+            .background(primaryBlue)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(!exportFormat.isEnabled(hasReferencePoints: hasReferencePoints))
+    }
+
     private var bottomInfoGrid: some View {
         HStack(spacing: 12) {
             infoCard(
@@ -191,14 +217,11 @@ struct ScanSettingsBottomSheet: View {
                 title: "Hệ tọa độ",
                 subtitle: "Toàn cầu (WGS84)"
             )
-            Button(action: onExport) {
-                infoCard(
-                    icon: "square.and.arrow.up",
-                    title: "Xuất File",
-                    subtitle: "OBJ / PLY"
-                )
-            }
-            .buttonStyle(.plain)
+            infoCard(
+                icon: "info.circle",
+                title: "Định dạng",
+                subtitle: exportFormat.fileExtension.uppercased()
+            )
         }
     }
 

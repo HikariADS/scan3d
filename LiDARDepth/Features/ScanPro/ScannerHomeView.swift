@@ -5,27 +5,15 @@
 
 import SwiftUI
 
-private struct ScanProject: Identifiable {
-    let id = UUID()
-    let name: String
-    let pointCount: String
-    let gradient: [Color]
-}
-
-private let sampleProjects: [ScanProject] = [
-    ScanProject(
-        name: "Phòng khách",
-        pointCount: "2.4M pts",
-        gradient: [Color(red: 0.35, green: 0.55, blue: 0.85), Color(red: 0.15, green: 0.25, blue: 0.45)]
-    ),
-    ScanProject(
-        name: "Ngoại thất",
-        pointCount: "1.1M pts",
-        gradient: [Color(red: 0.55, green: 0.65, blue: 0.75), Color(red: 0.25, green: 0.35, blue: 0.42)]
-    ),
+private let projectGradients: [[Color]] = [
+    [Color(red: 0.35, green: 0.55, blue: 0.85), Color(red: 0.15, green: 0.25, blue: 0.45)],
+    [Color(red: 0.55, green: 0.65, blue: 0.75), Color(red: 0.25, green: 0.35, blue: 0.42)],
+    [Color(red: 0.45, green: 0.72, blue: 0.58), Color(red: 0.18, green: 0.38, blue: 0.32)],
+    [Color(red: 0.72, green: 0.48, blue: 0.55), Color(red: 0.38, green: 0.22, blue: 0.28)],
 ]
 
 struct ScannerHomeView: View {
+    @ObservedObject private var library = ScanLibrary.shared
     var onStartScan: () -> Void
 
     var body: some View {
@@ -41,6 +29,7 @@ struct ScannerHomeView: View {
             .padding(.bottom, 24)
         }
         .background(ScannerTheme.background)
+        .onAppear { library.reload() }
     }
 
     private var header: some View {
@@ -112,10 +101,20 @@ struct ScannerHomeView: View {
             }
             .buttonStyle(.plain)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(sampleProjects) { project in
-                        ProjectThumbnailCard(project: project)
+            if library.records.isEmpty {
+                Text("Chưa có bản quét — xuất GLB để lưu vào máy.")
+                    .font(.caption)
+                    .foregroundStyle(ScannerTheme.mutedText)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 12) {
+                        ForEach(Array(library.records.prefix(6).enumerated()), id: \.element.id) { idx, record in
+                            ProjectThumbnailCard(
+                                record: record,
+                                gradient: projectGradients[idx % projectGradients.count],
+                                library: library
+                            )
+                        }
                     }
                 }
             }
@@ -177,31 +176,41 @@ private struct ViewfinderBrackets: View {
 }
 
 private struct ProjectThumbnailCard: View {
-    let project: ScanProject
+    let record: ScanRecord
+    let gradient: [Color]
+    @ObservedObject var library: ScanLibrary
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             ZStack(alignment: .bottomLeading) {
-                LinearGradient(colors: project.gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
+                LinearGradient(colors: gradient, startPoint: .topLeading, endPoint: .bottomTrailing)
                 ScanPointCloudPreview()
                     .opacity(0.85)
-                Text(project.pointCount)
-                    .font(.caption2.weight(.semibold).monospacedDigit())
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(.black.opacity(0.45))
-                    .clipShape(Capsule())
-                    .padding(8)
+                HStack(spacing: 4) {
+                    Text(library.pointCountLabel(record.triangleCount))
+                    if record.usedTexturedGLB {
+                        Image(systemName: "photo.fill")
+                            .font(.caption2)
+                    }
+                }
+                .font(.caption2.weight(.semibold).monospacedDigit())
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(.black.opacity(0.45))
+                .clipShape(Capsule())
+                .padding(8)
             }
             .frame(width: 140, height: 100)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
 
-            Text(project.name)
+            Text(record.name)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.white.opacity(0.85))
                 .padding(.top, 8)
                 .padding(.horizontal, 2)
+                .lineLimit(1)
         }
+        .frame(width: 140)
     }
 }
 

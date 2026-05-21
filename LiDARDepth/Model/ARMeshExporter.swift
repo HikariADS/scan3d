@@ -272,11 +272,27 @@ private final class DecodedStillFusionAdapter: ColorFusionFrame {
         miniDepth: FusionPackedMiniDepth?
     ) {
         guard let pb = FusionStillImageDecode.pixelBufferBGRA(from: imageBlob, codec: codec) else { return nil }
+        let bw = CVPixelBufferGetWidth(pb)
+        let bh = CVPixelBufferGetHeight(pb)
         fusionTimestamp = timestamp
         fusionCameraTransform = transform
-        fusionIntrinsics = intrinsics
-        fusionImageResolution = resolution
         fusionCapturedImage = pb
+        let refW = max(Float(resolution.width), 1)
+        let refH = max(Float(resolution.height), 1)
+        let sx = Float(bw) / refW
+        let sy = Float(bh) / refH
+        if abs(sx - 1) > 0.02 || abs(sy - 1) > 0.02 {
+            var K = intrinsics
+            K[0][0] *= sx
+            K[1][1] *= sy
+            K[2][0] *= sx
+            K[2][1] *= sy
+            fusionIntrinsics = K
+            fusionImageResolution = CGSize(width: bw, height: bh)
+        } else {
+            fusionIntrinsics = intrinsics
+            fusionImageResolution = resolution
+        }
         metricsLuma01 = meanLuma01
         metricsSharp01 = sharpness01
         cdf = lumaCDF.isEmpty ? FusionLumaHistogram.linearIdentityCDF() : lumaCDF
@@ -1507,25 +1523,26 @@ enum ARMeshExporter {
         let textureJPEG: Data
     }
 
-    static func buildTexturedOBJBundle(
-        from session: ARSession,
-        textureFilename: String = "texture.jpg",
-        profile: ExportProfile = ExportProfile(subject: .room),
-        detailPatches: [DetailPatch] = []
-    ) -> TexturedOBJBundle? {
-        defer { clearVertexFusionMaterialCache() }
-        guard let frame = session.currentFrame else { return nil }
-        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
-        guard !meshAnchors.isEmpty else { return nil }
-        let textureDiag = TextureDiag()
-        logExportHeader(tag: "TexturedOBJ", frame: frame)
+    private struct TexturedMeshPayload {
+        let positions: [Float]
+        let normals: [Float]
+        let texcoords: [Float]
+        let indices: [UInt32]
+        let textureJPEG: Data
+        let atlasFrameCount: Int
+        let atlasSize: CGSize
+    }
 
-        // Dùng FULL history để vùng quét sớm vẫn có ứng viên frame.
-        // `selectFusionSnapshots()` chỉ ~11 frame gần đỉnh khiến đỉnh từ frame ARKit cũ
-        // rơi vào fallback toàn frame hiện tại.
+    /// Atlas + UV + geometry dùng chung cho OBJ textured và GLB textured.
+    private static func buildTexturedMeshPayload(
+        meshAnchors: [ARMeshAnchor],
+        frame: ARFrame,
+        profile: ExportProfile,
+        detailPatches: [DetailPatch]
+    ) -> TexturedMeshPayload? {
+        let textureDiag = TextureDiag()
         let snapSelection = allHistorySnapshotsForAtlas(current: frame)
-        print("[TextureAtlas] History for atlas: \(snapSelection.count) snapshots")
-        let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile)
+        let preparedMeshes = prepareMeshes(meshAnchors: meshAnchors, frame: frame, profile: profile, forTexturedExport: true)
         guard !preparedMeshes.isEmpty else { return nil }
 
         let atlasFrames = bestTextureFusionFrames(
@@ -1539,33 +1556,41 @@ enum ARMeshExporter {
         let texW = atlas.size.width
         let texH = atlas.size.height
 
-        var vSection = ""
-        var vtSection = ""
-        var vnSection = ""
-        var fSection = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
-        var vertexBase = 1
+        var positions: [Float] = []
+        var normals: [Float] = []
+        var texcoords: [Float] = []
+        var indices: [UInt32] = []
+        var vertexOffset: UInt32 = 0
 
         for mesh in preparedMeshes {
+            let projPositions = mesh.projectionPositions
             for i in 0..<mesh.positions.count {
                 let v = mesh.positions[i]
+                let pp = projPositions[i]
                 let n = mesh.normals[i]
                 textureDiag.countVertex()
-                vSection += String(format: "v %.6f %.6f %.6f\n", v.x, v.y, v.z)
-                vnSection += String(format: "vn %.6f %.6f %.6f\n", n.x, n.y, n.z)
+                positions.append(contentsOf: [v.x, v.y, v.z])
+                normals.append(contentsOf: [n.x, n.y, n.z])
 
                 var u: Float = 0.5
                 var vCoord: Float = 0.5
-                let localProfile = profileForPosition(v, baseProfile: profile, detailPatches: detailPatches)
+                let localProfile = profileForPosition(pp, baseProfile: profile, detailPatches: detailPatches)
                 if let bestProjection = bestTextureProjection(
-                    worldPosition: v,
+                    worldPosition: pp,
                     normal: n,
                     frames: atlasFrames,
                     profile: localProfile,
                     diag: textureDiag
                 ) {
                     let tile = atlas.tiles[bestProjection.frameIndex]
-                    let atlasX = tile.origin.x + bestProjection.point.x
-                    let atlasY = tile.origin.y + bestProjection.point.y
+                    let fus = atlasFrames[bestProjection.frameIndex]
+                    let pb = fus.fusionCapturedImage
+                    let bw = max(CGFloat(CVPixelBufferGetWidth(pb)), 1)
+                    let bh = max(CGFloat(CVPixelBufferGetHeight(pb)), 1)
+                    let sx = tile.size.width / bw
+                    let sy = tile.size.height / bh
+                    let atlasX = tile.origin.x + bestProjection.point.x * sx
+                    let atlasY = tile.origin.y + bestProjection.point.y * sy
                     u = Float(max(0, min(atlasX / texW, 1)))
                     vCoord = Float(max(0, min(1 - atlasY / texH, 1)))
                     textureDiag.countMapped(
@@ -1578,17 +1603,72 @@ enum ARMeshExporter {
                 } else {
                     textureDiag.countUnmapped()
                 }
-                vtSection += String(format: "vt %.6f %.6f\n", u, vCoord)
+                texcoords.append(contentsOf: [u, vCoord])
             }
+            for idx in mesh.indices {
+                indices.append(vertexOffset + idx)
+            }
+            vertexOffset += UInt32(mesh.positions.count)
+        }
 
-            let base = vertexBase
-            for i in stride(from: 0, to: mesh.indices.count, by: 3) {
-                let i0 = Int(mesh.indices[i]) + base
-                let i1 = Int(mesh.indices[i + 1]) + base
-                let i2 = Int(mesh.indices[i + 2]) + base
-                fSection += "f \(i0)/\(i0)/\(i0) \(i1)/\(i1)/\(i1) \(i2)/\(i2)/\(i2)\n"
-            }
-            vertexBase += mesh.positions.count
+        guard !positions.isEmpty, !indices.isEmpty else { return nil }
+        textureDiag.printSummary(
+            tag: "TexturedMesh",
+            atlasFrameCount: atlasFrames.count,
+            atlasSize: atlas.size,
+            jpegBytes: atlas.jpegData.count
+        )
+        return TexturedMeshPayload(
+            positions: positions,
+            normals: normals,
+            texcoords: texcoords,
+            indices: indices,
+            textureJPEG: atlas.jpegData,
+            atlasFrameCount: atlasFrames.count,
+            atlasSize: atlas.size
+        )
+    }
+
+    static func buildTexturedOBJBundle(
+        from session: ARSession,
+        textureFilename: String = "texture.jpg",
+        profile: ExportProfile = ExportProfile(subject: .room),
+        detailPatches: [DetailPatch] = []
+    ) -> TexturedOBJBundle? {
+        defer { clearVertexFusionMaterialCache() }
+        guard let frame = session.currentFrame else { return nil }
+        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshAnchors.isEmpty else { return nil }
+        logExportHeader(tag: "TexturedOBJ", frame: frame)
+
+        guard let payload = buildTexturedMeshPayload(
+            meshAnchors: meshAnchors,
+            frame: frame,
+            profile: profile,
+            detailPatches: detailPatches
+        ) else { return nil }
+
+        let vertexCount = payload.positions.count / 3
+        var vSection = ""
+        var vtSection = ""
+        var vnSection = ""
+        var fSection = "mtllib \(textureFilename.replacingOccurrences(of: ".jpg", with: ".mtl"))\nusemtl camera_tex\n"
+
+        for i in 0..<vertexCount {
+            let vi = i * 3
+            vSection += String(format: "v %.6f %.6f %.6f\n",
+                               payload.positions[vi], payload.positions[vi + 1], payload.positions[vi + 2])
+            vnSection += String(format: "vn %.6f %.6f %.6f\n",
+                                payload.normals[vi], payload.normals[vi + 1], payload.normals[vi + 2])
+            let ti = i * 2
+            vtSection += String(format: "vt %.6f %.6f\n", payload.texcoords[ti], payload.texcoords[ti + 1])
+        }
+
+        for i in stride(from: 0, to: payload.indices.count, by: 3) {
+            let i0 = Int(payload.indices[i]) + 1
+            let i1 = Int(payload.indices[i + 1]) + 1
+            let i2 = Int(payload.indices[i + 2]) + 1
+            fSection += "f \(i0)/\(i0)/\(i0) \(i1)/\(i1)/\(i1) \(i2)/\(i2)/\(i2)\n"
         }
 
         let obj = vSection + vtSection + vnSection + fSection
@@ -1601,13 +1681,42 @@ enum ARMeshExporter {
         illum 1
         map_Kd \(textureFilename)
         """
-        textureDiag.printSummary(
-            tag: "TexturedOBJ",
-            atlasFrameCount: atlasFrames.count,
-            atlasSize: atlas.size,
-            jpegBytes: atlas.jpegData.count
-        )
-        return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: atlas.jpegData)
+        return TexturedOBJBundle(obj: obj, mtl: mtl, textureJPEG: payload.textureJPEG)
+    }
+
+    /// glTF 2.0 binary: mesh + embedded JPEG atlas (`baseColorTexture`), unlit.
+    static func buildTexturedGLB(
+        from session: ARSession,
+        profile: ExportProfile = ExportProfile(subject: .room),
+        detailPatches: [DetailPatch] = []
+    ) -> Data? {
+        defer { clearVertexFusionMaterialCache() }
+        guard let frame = session.currentFrame else { return nil }
+        let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+        guard !meshAnchors.isEmpty else { return nil }
+        logExportHeader(tag: "TexturedGLB", frame: frame)
+        guard let payload = buildTexturedMeshPayload(
+            meshAnchors: meshAnchors,
+            frame: frame,
+            profile: profile,
+            detailPatches: detailPatches
+        ) else { return nil }
+        return encodeTexturedGLB(payload: payload)
+    }
+
+    /// GLB ưu tiên: texture atlas (nét) → fallback vertex color faceted.
+    static func buildPremiumGLB(
+        from session: ARSession,
+        profile: ExportProfile = ExportProfile(subject: .room),
+        detailPatches: [DetailPatch] = []
+    ) -> (data: Data, usedTexture: Bool)? {
+        if let textured = buildTexturedGLB(from: session, profile: profile, detailPatches: detailPatches) {
+            return (textured, true)
+        }
+        if let faceted = buildFacetedGLB(from: session, profile: profile, detailPatches: detailPatches) {
+            return (faceted, false)
+        }
+        return nil
     }
 
     private struct FusionSnapshotImagePack {
@@ -2056,6 +2165,67 @@ enum ARMeshExporter {
         return out
     }
 
+    private static func encodeTexturedGLB(payload: TexturedMeshPayload) -> Data? {
+        let vertexCount = payload.positions.count / 3
+        guard vertexCount > 0, !payload.indices.isEmpty, !payload.textureJPEG.isEmpty else { return nil }
+
+        let posData = payload.positions.withUnsafeBufferPointer { Data(buffer: $0) }
+        let normData = payload.normals.withUnsafeBufferPointer { Data(buffer: $0) }
+        let uvData = payload.texcoords.withUnsafeBufferPointer { Data(buffer: $0) }
+        let indexData = payload.indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let imageData = payload.textureJPEG
+
+        var binChunk = Data()
+        binChunk.append(posData)
+        binChunk.append(normData)
+        binChunk.append(uvData)
+        binChunk.append(indexData)
+        binChunk.append(imageData)
+        while binChunk.count % 4 != 0 { binChunk.append(0) }
+        let bufferByteLength = binChunk.count
+
+        var minP = SIMD3<Float>(Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude, Float.greatestFiniteMagnitude)
+        var maxP = SIMD3<Float>(-Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude, -Float.greatestFiniteMagnitude)
+        for i in 0..<vertexCount {
+            let x = payload.positions[i * 3]
+            let y = payload.positions[i * 3 + 1]
+            let z = payload.positions[i * 3 + 2]
+            minP = SIMD3<Float>(min(minP.x, x), min(minP.y, y), min(minP.z, z))
+            maxP = SIMD3<Float>(max(maxP.x, x), max(maxP.y, y), max(maxP.z, z))
+        }
+
+        let p0 = posData.count
+        let p1 = p0 + normData.count
+        let p2 = p1 + uvData.count
+        let p3 = p2 + indexData.count
+        let p4 = p3 + imageData.count
+
+        let json = """
+        {"asset":{"version":"2.0","generator":"ScanPro 3D"},"extensionsUsed":["KHR_materials_unlit"],"scene":0,"scenes":[{"nodes":[0]}],"nodes":[{"mesh":0}],"meshes":[{"primitives":[{"attributes":{"POSITION":0,"NORMAL":1,"TEXCOORD_0":2},"indices":3,"material":0}]}],"materials":[{"doubleSided":true,"extensions":{"KHR_materials_unlit":{}},"pbrMetallicRoughness":{"baseColorTexture":{"index":0},"metallicFactor":0.0,"roughnessFactor":1.0}}],"textures":[{"source":0}],"images":[{"mimeType":"image/jpeg","bufferView":4}],"buffers":[{"byteLength":\(bufferByteLength)}],"bufferViews":[{"buffer":0,"byteOffset":0,"byteLength":\(posData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p0),"byteLength":\(normData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p1),"byteLength":\(uvData.count),"target":\(gltfArrayBuffer)},{"buffer":0,"byteOffset":\(p2),"byteLength":\(indexData.count),"target":\(gltfElementArrayBuffer)},{"buffer":0,"byteOffset":\(p3),"byteLength":\(imageData.count)}],"accessors":[{"bufferView":0,"componentType":5126,"count":\(vertexCount),"type":"VEC3","min":[\(minP.x),\(minP.y),\(minP.z)],"max":[\(maxP.x),\(maxP.y),\(maxP.z)]},{"bufferView":1,"componentType":5126,"count":\(vertexCount),"type":"VEC3"},{"bufferView":2,"componentType":5126,"count":\(vertexCount),"type":"VEC2"},{"bufferView":3,"componentType":5125,"count":\(payload.indices.count),"type":"SCALAR"}]}
+        """
+
+        var jsonData = Data(json.utf8)
+        while jsonData.count % 4 != 0 { jsonData.append(0x20) }
+
+        let totalLength = 12 + 8 + jsonData.count + 8 + binChunk.count
+        var out = Data()
+        out.append(contentsOf: [0x67, 0x6C, 0x54, 0x46])
+        out.append(contentsOf: [2, 0, 0, 0])
+        var totalLE = UInt32(totalLength).littleEndian
+        out.append(Data(bytes: &totalLE, count: 4))
+
+        var jsonLenLE = UInt32(jsonData.count).littleEndian
+        out.append(Data(bytes: &jsonLenLE, count: 4))
+        out.append(contentsOf: [0x4A, 0x53, 0x4F, 0x4E])
+        out.append(jsonData)
+
+        var binLenLE = UInt32(binChunk.count).littleEndian
+        out.append(Data(bytes: &binLenLE, count: 4))
+        out.append(contentsOf: [0x42, 0x49, 0x4E, 0x00])
+        out.append(binChunk)
+        return out
+    }
+
     // MARK: - Geometry helpers
 
     private static func worldVertexPositions(geometry: ARMeshGeometry, transform: simd_float4x4) -> [SIMD3<Float>] {
@@ -2104,6 +2274,8 @@ enum ARMeshExporter {
 
     private struct PreparedMesh {
         let positions: [SIMD3<Float>]
+        /// Vị trí trước Laplacian smooth — dùng chiếu UV để khớp ảnh camera với geometry quét gốc.
+        let projectionPositions: [SIMD3<Float>]
         let normals: [SIMD3<Float>]
         let indices: [UInt32]
     }
@@ -2126,7 +2298,12 @@ enum ARMeshExporter {
         let isRelaxed: Bool
     }
 
-    private static func prepareMeshes(meshAnchors: [ARMeshAnchor], frame: ARFrame, profile: ExportProfile) -> [PreparedMesh] {
+    private static func prepareMeshes(
+        meshAnchors: [ARMeshAnchor],
+        frame: ARFrame,
+        profile: ExportProfile,
+        forTexturedExport: Bool = false
+    ) -> [PreparedMesh] {
         // Gộp mọi anchor thành một mesh trước khi mịn.
         // Giúp Laplacian/bilateral không bị cắt ở ranh anchor và
         // weld đỉnh bịt các kẽ đen giữa chunk.
@@ -2157,25 +2334,41 @@ enum ARMeshExporter {
         // Hàn đỉnh trong ≤5 mm để bịt khớp mép anchor.
         MeshLaplacianSmooth.weldVertices(positions: &allPositions, triangleIndices: &allIndices, epsilon: 0.005)
 
-        // Mịn + lấp lỗ trên mesh thống nhất (đã có láng giềng xuyên ranh).
-        MeshLaplacianSmooth.smooth(positions: &allPositions, triangleIndices: allIndices)
+        if !forTexturedExport {
+            MeshLaplacianSmooth.smooth(positions: &allPositions, triangleIndices: allIndices)
+        }
         MeshLaplacianSmooth.fillSmallBoundaryHoles(positions: &allPositions, triangleIndices: &allIndices)
+
+        let projectionPositions = allPositions
 
         let normals = MeshLaplacianSmooth.vertexNormals(positions: allPositions, triangleIndices: allIndices)
         let camPos  = cameraPosition(frame: frame)
-        let filtered = filterMesh(positions: allPositions, normals: normals, indices: allIndices, cameraPosition: camPos, profile: profile)
+        let filtered = filterMesh(
+            positions: allPositions,
+            projectionPositions: projectionPositions,
+            normals: normals,
+            indices: allIndices,
+            cameraPosition: camPos,
+            profile: profile
+        )
         return filtered.indices.isEmpty ? [] : [filtered]
     }
 
     private static func filterMesh(
         positions: [SIMD3<Float>],
+        projectionPositions: [SIMD3<Float>],
         normals: [SIMD3<Float>],
         indices: [UInt32],
         cameraPosition: SIMD3<Float>,
         profile: ExportProfile
     ) -> PreparedMesh {
         if profile.subject == .room {
-            return PreparedMesh(positions: positions, normals: normals, indices: indices)
+            return PreparedMesh(
+                positions: positions,
+                projectionPositions: projectionPositions,
+                normals: normals,
+                indices: indices
+            )
         }
 
         var keptVertices = Set<Int>()
@@ -2206,17 +2399,20 @@ enum ARMeshExporter {
         }
 
         guard !keptTriangles.isEmpty else {
-            return PreparedMesh(positions: [], normals: [], indices: [])
+            return PreparedMesh(positions: [], projectionPositions: [], normals: [], indices: [])
         }
 
         var remap: [Int: UInt32] = [:]
         var newPositions: [SIMD3<Float>] = []
+        var newProjectionPositions: [SIMD3<Float>] = []
         var newNormals: [SIMD3<Float>] = []
         newPositions.reserveCapacity(keptVertices.count)
+        newProjectionPositions.reserveCapacity(keptVertices.count)
         newNormals.reserveCapacity(keptVertices.count)
         for oldIndex in keptVertices.sorted() {
             remap[oldIndex] = UInt32(newPositions.count)
             newPositions.append(positions[oldIndex])
+            newProjectionPositions.append(projectionPositions[oldIndex])
             newNormals.append(normals[oldIndex])
         }
 
@@ -2227,7 +2423,12 @@ enum ARMeshExporter {
             newIndices.append(contentsOf: [a, b, c])
         }
 
-        return PreparedMesh(positions: newPositions, normals: newNormals, indices: newIndices)
+        return PreparedMesh(
+            positions: newPositions,
+            projectionPositions: newProjectionPositions,
+            normals: newNormals,
+            indices: newIndices
+        )
     }
 
     private static func cameraPosition(frame: ARFrame) -> SIMD3<Float> {
@@ -2454,15 +2655,52 @@ enum ARMeshExporter {
         return selectedIndices.map { materialized[$0] }
     }
 
-    private static func buildTextureAtlas(from frames: [ColorFusionFrame], quality: CGFloat) -> TextureAtlas? {
-        guard !frames.isEmpty else { return nil }
-        let images = frames.compactMap { fus -> UIImage? in
-            let ci = CIImage(cvPixelBuffer: fus.fusionCapturedImage)
-            let ctx = CIContext(options: [.useSoftwareRenderer: false])
-            guard let cg = ctx.createCGImage(ci, from: ci.extent) else { return nil }
+    /// CVPixelBuffer → UIImage cho atlas, khớp tọa độ pixel dùng trong `projectWorldToImagePixel` (Y=0 trên).
+    private static func pixelBufferToAtlasUIImage(_ pb: CVPixelBuffer) -> UIImage? {
+        let format = CVPixelBufferGetPixelFormatType(pb)
+        if format == kCVPixelFormatType_32BGRA {
+            CVPixelBufferLockBaseAddress(pb, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+            let w = CVPixelBufferGetWidth(pb)
+            let h = CVPixelBufferGetHeight(pb)
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
+            guard let baseAddress = CVPixelBufferGetBaseAddress(pb) else { return nil }
+            let colorSpace = CGColorSpaceCreateDeviceRGB()
+            guard let context = CGContext(
+                data: baseAddress,
+                width: w,
+                height: h,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: CGBitmapInfo.byteOrder32Little.rawValue
+                    | CGImageAlphaInfo.premultipliedFirst.rawValue
+            ), let cg = context.makeImage() else { return nil }
             return UIImage(cgImage: cg)
         }
-        guard !images.isEmpty else { return nil }
+
+        // YUV live frame: CIImage mặc định Y=0 dưới — lật về top-left trước khi ghép atlas.
+        let ci = CIImage(cvPixelBuffer: pb)
+        let flip = CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -ci.extent.height)
+        let upright = ci.transformed(by: flip)
+        let ctx = CIContext(options: [.useSoftwareRenderer: false])
+        guard let cg = ctx.createCGImage(upright, from: upright.extent) else { return nil }
+        return UIImage(cgImage: cg)
+    }
+
+    private static func buildTextureAtlas(from frames: [ColorFusionFrame], quality: CGFloat) -> TextureAtlas? {
+        guard !frames.isEmpty else { return nil }
+        var images: [UIImage] = []
+        images.reserveCapacity(frames.count)
+        for fus in frames {
+            let pb = fus.fusionCapturedImage
+            if let image = pixelBufferToAtlasUIImage(pb) {
+                images.append(image)
+            } else {
+                images.append(UIImage())
+            }
+        }
+        guard images.contains(where: { $0.size.width > 0 }) else { return nil }
 
         let tileW = images.map(\.size.width).max() ?? 0
         let tileH = images.map(\.size.height).max() ?? 0
@@ -3426,7 +3664,7 @@ enum ARMeshExporter {
         let cy = CGFloat(K[2][1])
 
         let pxRaw = fx * CGFloat(camPt.x) / CGFloat(depth) + cx
-        let pyRaw = cy - fy * CGFloat(camPt.y) / CGFloat(depth)
+        let pyRaw = cy + fy * CGFloat(camPt.y) / CGFloat(depth)
         let manualCal = CGPoint(x: pxRaw, y: pyRaw)
 
         let pb = frame.fusionCapturedImage
